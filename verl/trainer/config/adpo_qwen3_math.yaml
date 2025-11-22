@@ -1,0 +1,217 @@
+# ADPO Training Configuration - Qwen3 on MATH Dataset
+# Based on Open-R1 ADPO baseline configuration
+# Dataset: MATH-lighteval-level_3
+
+defaults:
+  - adpo_trainer
+
+# Model configuration
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-1.7B
+    # use_shm: false
+  
+  actor:
+    # Training strategy: fsdp or fsdp2
+    strategy: fsdp
+    
+    # Model initialization kwargs
+    model_init_kwargs:
+      torch_dtype: bfloat16
+      attn_implementation: flash_attention_2
+    
+    # Optimizer configuration
+    optim:
+      lr: 1.5e-5
+      
+    # Use KL loss
+    use_kl_loss: false
+  
+  rollout:
+    # vLLM configuration
+    mode: async
+    
+    # vLLM settings
+    use_vllm: true
+    vllm_mode: colocate
+    vllm_enable_sleep_mode: true
+    vllm_gpu_memory_utilization: 0.4
+    vllm_tensor_parallel_size: 1
+    
+    # Generation parameters
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    max_prompt_length: 512
+    max_completion_length: 1024
+
+# Data configuration
+data:
+  # Dataset
+  train_files:
+    - hf://watermelonhjg/MATH-lighteval-level_3/train
+  val_files:
+    - hf://watermelonhjg/MATH-lighteval-level_3/validation
+  
+  # Prompt column
+  prompt_key: problem
+  
+  # System prompt
+  system_prompt: |
+    You are a helpful AI Assistant that provides well-reasoned and detailed responses.
+    First think about the reasoning process as an internal monologue and then provide the user with the answer.
+    Respond in the following format:
+    <think>
+    ...
+    </think>
+    <answer>
+    ...
+    </answer>
+  
+  # Shuffling
+  shuffle: false
+  
+  # Trust remote code
+  trust_remote_code: true
+
+# ADPO Algorithm configuration
+algorithm:
+  _target_: verl.trainer.config.AlgoConfig
+  
+  # Advantage estimator
+  adv_estimator: adpo
+  
+  # Number of generations per prompt
+  num_generations: 8
+  
+  # ADPO Core Parameters
+  tau: 0.8
+  anchor_update_mode: on_policy
+  beta_anchor_kl: 0.0
+  
+  # Adaptive Temperature
+  use_adaptive_tau: true
+  adaptive_tau_alpha: 1.0
+  adaptive_tau_min: 0.1
+  
+  # Q computation
+  beta_reward: 0.5
+  use_q_centering: true
+  
+  # Reward scaling
+  scale_rewards: group
+  
+  # Drop failed prompts
+  drop_all_failed_prompts: false
+  
+  # KL penalty (disabled)
+  use_kl_in_reward: false
+  kl_penalty: kl
+
+# Reward function configuration
+custom_reward_function:
+  path: verl/trainer/adpo/reward.py
+  name: good_accuracy
+
+reward_model:
+  enable: false
+  reward_kwargs:
+    ngram_size: 4
+    max_penalty: -0.5
+    penalty_scale_factor: 0.1
+
+# Trainer configuration
+trainer:
+  # Project and experiment name
+  project_name: open-r1-ADPO
+  experiment_name: qwen3-1.7b-adpo-baseline
+  
+  # Training parameters
+  total_epochs: 2
+  total_training_steps: null
+  
+  # Batch size
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  
+  # Gradient accumulation
+  gradient_accumulation_steps: 16
+  
+  # Gradient checkpointing
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+  
+  # Mixed precision
+  bf16: true
+  fp16: false
+  
+  # Learning rate scheduler
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.1
+  
+  # Evaluation
+  do_eval: true
+  eval_strategy: epoch
+  
+  # Saving
+  save_strategy: epoch
+  save_total_limit: 2
+  save_freq: 1
+  
+  # Logging
+  logger: ["console", "wandb"]
+  log_completions: true
+  log_level: info
+  logging_first_step: true
+  logging_steps: 1
+  
+  # Output directory
+  default_local_dir: data/Qwen3-1.7B-Open-R1-ADPO
+  
+  # Hub
+  push_to_hub: false
+  hub_model_id: null
+  
+  # Seed
+  seed: 42
+  
+  # Dataloader
+  dataloader_drop_last: true
+  dataloader_num_workers: 0
+  
+  # Nodes and GPUs
+  nnodes: 1
+  n_gpus_per_node: 8
+
+# WandB configuration
+wandb_config:
+  project: open-r1-ADPO
+  entity: null
+  name: qwen3-1.7b-adpo-baseline
+  group: qwen3_adpo_baseline
+  tags:
+    - adpo
+    - qwen3
+    - math
+    - reasoning
+
+# Ray configuration
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        TOKENIZERS_PARALLELISM: "false"
+        NCCL_DEBUG: "WARN"
+        VLLM_LOGGING_LEVEL: "WARNING"
+    num_cpus: null
+
+# Transfer queue (disabled)
+transfer_queue:
+  enable: false
+
+# Global profiler (disabled)
+global_profiler:
+  tool: none
+  steps: []
+

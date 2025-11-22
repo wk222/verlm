@@ -1,0 +1,265 @@
+# ADPO Trainer Configuration
+# Based on ppo_trainer.yaml with ADPO-specific modifications
+
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# specify the default per-component configs
+defaults:
+
+  # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
+  # actor_rollout_ref.actor: trainer/config/actor/dp_actor.yaml
+  - actor@actor_rollout_ref.actor: dp_actor
+
+  # data: trainer/config/data/legacy_data.yaml
+  - data@data: legacy_data
+
+  # Reference model config.
+  # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
+  - ref@actor_rollout_ref.ref: dp_ref
+
+  # Rollout model config.
+  - rollout@actor_rollout_ref.rollout: rollout
+
+  # Model config.
+  - model@actor_rollout_ref.model: hf_model
+
+  # Critic model config.
+  - critic@critic: dp_critic
+
+  # Reward model config.
+  - reward_model@reward_model: dp_reward_model
+
+  # Rollout correction config.
+  - algorithm@algorithm.rollout_correction: rollout_correction
+
+  # load the reference default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
+# config for actor, rollout and reference model
+actor_rollout_ref:
+
+  # Whether it's a hybrid engine, currently only supports hybrid engine
+  hybrid_engine: true
+
+  # Timeout for operations executed against the process group
+  nccl_timeout: 600
+
+  # Rollout model config.
+  rollout:
+
+    # for huge model, layered summon can save memory (prevent OOM) but make it slower
+    layered_summon: False
+
+# custom reward function definition
+custom_reward_function:
+
+  # The path to the file containing your customized reward function.
+  # If not specified, pre-implemented reward functions will be used.
+  path: null
+
+  # The name of the reward function within the specified file. Default is 'compute_score'.
+  name: compute_score
+
+# config for the algorithm
+algorithm:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.trainer.config.AlgoConfig
+
+  # Discount factor for future rewards
+  gamma: 1.0
+
+  # Trade-off between bias and variance in the GAE estimator
+  lam: 1.0
+
+  # Advantage estimator type: "adpo" for ADPO, "grpo" also works
+  adv_estimator: adpo
+
+  # Whether to normalize advantages by std (specific to GRPO/ADPO)
+  norm_adv_by_std_in_grpo: True
+
+  # Whether to enable in-reward KL penalty
+  use_kl_in_reward: False
+
+  # How to estimate KL divergence: "kl", "abs", "mse", "low_var_kl", or "full"
+  kl_penalty: kl
+
+  # KL control configuration
+  kl_ctrl:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.KLControlConfig
+
+    # KL control type: "fixed" or "adaptive"
+    type: fixed
+
+    # Initial coefficient for KL penalty
+    kl_coef: 0.001
+
+    # Horizon value for adaptive controller (if enabled)
+    horizon: 10000
+
+    # Target KL divergence (used for adaptive controller)
+    target_kl: 0.1
+
+  # Number of generations per prompt (for ADPO listwise loss)
+  num_generations: 8
+
+  # ========== ADPO-Specific Configuration ==========
+
+  # Temperature parameter for the anchored softmax distribution.
+  # Lower values make the distribution sharper (more peaked).
+  tau: 0.8
+
+  # How to update the anchor policy:
+  # - "on_policy": Use old_per_token_logps as anchor (like GRPO) [DEFAULT]
+  # - "fixed": Never update the anchor (standard ADPO)
+  # - "ema": Exponential moving average update every step
+  # - "kl_triggered": Update when KL divergence exceeds threshold
+  anchor_update_mode: on_policy
+
+  # EMA coefficient for anchor updates (only used if anchor_update_mode="ema").
+  # Higher values make the anchor more stable. Formula: anchor = alpha * anchor + (1-alpha) * current
+  ema_alpha: 0.99
+
+  # KL divergence threshold for triggered updates (only used if anchor_update_mode="kl_triggered").
+  # When the running average KL exceeds this threshold, the anchor is updated.
+  kl_threshold: 0.1
+
+  # Whether to center advantages by group mean before computing target distribution.
+  # This helps numerical stability and is recommended for most use cases.
+  use_q_centering: True
+
+  # ADPO-specific KL penalty coefficient for KL(π_current || π_anchor).
+  # This is different from kl_coef (used for ref_model).
+  # Set to 0 for pure ADPO (using only the anchoring mechanism).
+  beta_anchor_kl: 0.0
+
+  # Whether to use entropy-based adaptive temperature scaling (Section 3.7 of paper).
+  use_adaptive_tau: True
+
+  # Modulation strength for adaptive tau. Formula: tau * (1 - alpha * H/H_max)
+  adaptive_tau_alpha: 0.5
+
+  # Minimum value for tau when using adaptive scaling (to prevent division by zero).
+  adaptive_tau_min: 0.05
+
+  # Temperature for reward softmax (q computation). q = softmax(R_norm / beta_reward).
+  beta_reward: 0.5
+
+  # Whether to drop prompts where all generations have 0 reward.
+  drop_all_failed_prompts: False
+
+  # How to scale rewards: "batch", "group", or "none"
+  scale_rewards: group
+
+# config for the trainer
+trainer:
+
+  # Whether to balance batch sizes across distributed workers
+  balance_batch: True
+
+  # Number of epochs in training
+  total_epochs: 30
+
+  # Total training steps (can be set explicitly or derived from epochs)
+  total_training_steps: null
+
+  # Project name for experiment tracking (e.g., wandb)
+  project_name: verl_examples
+
+  # Experiment name for run identification in tracking tools
+  experiment_name: adpo_training
+
+  # Logging backends to use: "console", "wandb", etc.
+  logger: ["console", "wandb"]
+
+  # Number of generations to log during validation
+  log_val_generations: 0
+
+  # Directory for logging rollout data; no dump if null
+  rollout_data_dir: null
+
+  # Directory for logging validation data; no dump if null
+  validation_data_dir: null
+
+  # Number of nodes used in the training
+  nnodes: 1
+
+  # Number of GPUs per node
+  n_gpus_per_node: 8
+
+  # Whether to save checkpoint during training
+  save_freq: 1
+
+  # Directory for saving checkpoints
+  default_hdfs_dir: null
+
+  # Directory for local checkpoints
+  default_local_dir: null
+
+  # Whether to skip iterations with rollout issues
+  rollout_skip_on_exception: False
+
+# Transfer queue configuration
+transfer_queue:
+
+  # Whether to enable transfer queue for data transfer
+  enable: False
+
+# Ray configuration
+ray_kwargs:
+
+  # Ray initialization configuration
+  ray_init:
+
+    # Runtime environment for Ray workers
+    runtime_env:
+
+      # Environment variables for Ray workers
+      env_vars:
+        TOKENIZERS_PARALLELISM: "false"
+        NCCL_DEBUG: "WARN"
+        VLLM_LOGGING_LEVEL: "WARNING"
+
+    # Number of CPUs to use (auto-detect if not specified)
+    num_cpus: null
+
+  # Timeline trace file for performance profiling
+  timeline_json_file: null
+
+# Global profiler configuration
+global_profiler:
+
+  # Profiling tool: "none", "nsys", etc.
+  tool: none
+
+  # Training steps to profile
+  steps: []
+
+  # Tool-specific configuration
+  global_tool_config:
+
+    # Nsys profiler configuration
+    nsys:
+
+      # Nsight profiler options for controller
+      controller_nsight_options:
+
+        # Profile from beginning
+        profile_from_start: "on"
+
+        # Wait time before profiling
+        wait_time: 0
+
+        # Profile duration
+        duration: 20
+
+        # Capture range
+        capture_range: cudaProfilerApi
+
