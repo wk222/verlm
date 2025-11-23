@@ -18,6 +18,11 @@ actor_rollout_ref:
     # Batch size configuration
     ppo_micro_batch_size_per_gpu: 8
     
+    # FSDP configuration
+    fsdp_config:
+      dtype: bfloat16
+      model_dtype: bfloat16  # Model initialization dtype
+    
     # Optimizer configuration
     optim:
       lr: 1.5e-5
