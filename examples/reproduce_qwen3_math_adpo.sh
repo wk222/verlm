@@ -24,31 +24,21 @@ fi
 
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3  # 4 GPUs
 
 # Configuration
 CONFIG_NAME="adpo_qwen3_math"
 OUTPUT_DIR="data/Qwen3-1.7B-Open-R1-ADPO"
+N_GPUS=4
 
 echo "Configuration:"
 echo "  - Config: ${CONFIG_NAME}"
 echo "  - Output: ${OUTPUT_DIR}"
-echo "  - GPUs: ${CUDA_VISIBLE_DEVICES}"
+echo "  - GPUs: ${CUDA_VISIBLE_DEVICES} (${N_GPUS} GPUs)"
 echo ""
 
-# Optional: Install dependencies for good_accuracy reward
-echo "Checking dependencies..."
-if ! python -c "import latex2sympy2_extended" 2>/dev/null; then
-    echo "⚠️  Installing latex2sympy2_extended..."
-    pip install latex2sympy2_extended
-fi
-
-if ! python -c "import math_verify" 2>/dev/null; then
-    echo "⚠️  Installing math_verify..."
-    pip install math_verify
-fi
-
-echo "✅ Dependencies OK"
+# Dependencies are handled by VERL's prime_math (sympy-based)
+echo "✅ Using VERL's built-in sympy-based math verification"
 echo ""
 
 # Run ADPO training
@@ -57,6 +47,7 @@ echo ""
 
 python -m verl.trainer.main_adpo \
     --config-name ${CONFIG_NAME} \
+    trainer.n_gpus_per_node=${N_GPUS} \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.experiment_name=qwen3-1.7b-adpo-math-reproduction \
     wandb_config.name=qwen3-1.7b-adpo-math-reproduction \

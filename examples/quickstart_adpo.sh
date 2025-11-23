@@ -89,7 +89,7 @@ case $choice in
     5)
         echo ""
         echo "🚀 Starting ADPO with good_accuracy reward..."
-        echo "Note: This requires latex2sympy2_extended and math_verify"
+        echo "Note: Uses VERL's built-in sympy-based math verification"
         python -m verl.trainer.main_adpo \
             --config-name adpo_trainer \
             algorithm.adv_estimator=adpo \

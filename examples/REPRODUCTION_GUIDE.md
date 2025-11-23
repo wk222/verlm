@@ -14,11 +14,11 @@
 # 1. 进入 verlm 目录
 cd verlm
 
-# 2. 安装依赖
-pip install latex2sympy2_extended math_verify
-
-# 3. 验证安装
+# 2. 验证安装（无需额外依赖，VERL 自带 sympy 验证）
 python examples/test_adpo_installation.py
+
+# Note: good_accuracy 奖励函数使用 VERL 内置的 prime_math（基于 sympy）
+# 无需安装 latex2sympy2_extended 或 math_verify
 ```
 
 ### 快速启动
@@ -127,15 +127,15 @@ reward_model:
 ### 多GPU训练
 
 ```bash
-# 8 GPU 训练（默认）
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+# 4 GPU 训练（默认，与原始实验一致）
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 bash examples/reproduce_qwen3_math_adpo.sh
 
-# 4 GPU 训练
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+# 8 GPU 训练
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 python -m verl.trainer.main_adpo \
     --config-name adpo_qwen3_math \
-    trainer.n_gpus_per_node=4
+    trainer.n_gpus_per_node=8
 
 # 单 GPU 测试
 export CUDA_VISIBLE_DEVICES=0

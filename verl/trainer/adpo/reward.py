@@ -44,15 +44,23 @@ def load_reward_manager(config, tokenizer, num_examine=0, **kwargs):
     return load_ppo_reward_manager(config, tokenizer, num_examine, **kwargs)
 
 
-def is_pure_numerical(text: str) -> bool:
-    """检查字符串是否完全由一个简单的整数或小数构成。"""
-    if not isinstance(text, str):
-        return False
-    text = text.strip()
-    if not text:
-        return False
-    pattern = r"^[+-]?(\d+(\.\d*)?|\.\d+)$"
-    return bool(re.fullmatch(pattern, text))
+def extract_boxed_answer(text: str) -> str:
+    """从文本中提取 \\boxed{} 或 <answer> 标签中的答案。"""
+    # 尝试提取 \\boxed{}
+    boxed_pattern = r'\\boxed\{([^}]+)\}'
+    boxed_match = re.search(boxed_pattern, text)
+    if boxed_match:
+        return boxed_match.group(1).strip()
+    
+    # 尝试提取 <answer> </answer>
+    answer_pattern = r'<answer>\s*(.*?)\s*</answer>'
+    answer_match = re.search(answer_pattern, text, re.DOTALL)
+    if answer_match:
+        return answer_match.group(1).strip()
+    
+    # 如果都没有，返回最后一行非空内容
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    return lines[-1] if lines else text.strip()
 
 
 def good_accuracy(
@@ -62,29 +70,23 @@ def good_accuracy(
     **kwargs
 ):
     """
-    计算组合奖励 (版本：强制使用原始逻辑，纯数字答案尝试包装后处理)。
-    - **所有情况**都尝试使用原始的 parse/verify 逻辑。
-    - 如果基准答案是纯数字，会先用花括号 {} 包装后再传入 parse。
-    - **警告**: 此方法的准确性高度依赖于 parse/verify 处理包装后数字的能力，
-               以及 verify 进行跨格式数值等价比较的能力。请务必测试！
+    计算组合奖励（使用 VERL 自带的 sympy 验证方法）。
+    
+    - 使用 VERL 的 prime_math.compute_score 进行数学等价性验证
+    - 对错误答案应用 N-gram 重复惩罚
+    - 不需要额外的依赖（latex2sympy2_extended）
 
     参数:
         ngram_size: 用于计算重复惩罚的n-gram大小。
         max_penalty: 最大的（负数）重复惩罚值。
         penalty_scale_factor: 当答案错误时，应用于重复惩罚的缩放因子 (默认为 0.1)。
-        **kwargs: GRPOTrainer 传入的其他数据集列, 必须包含 "completions" 和 "solution"。
+        **kwargs: Trainer 传入的数据集列, 必须包含 "completions" 和 "solution"。
 
     返回:
         list[float]: 每个 completion 对应的奖励值列表。
     """
-    try:
-        from latex2sympy2_extended import NormalizationConfig
-        from math_verify import LatexExtractionConfig, parse, verify
-    except ImportError:
-        raise ImportError(
-            "good_accuracy reward requires latex2sympy2_extended and math_verify. "
-            "Install with: pip install latex2sympy2_extended math_verify"
-        )
+    # 导入 VERL 自带的数学验证工具
+    from verl.utils.reward_score import prime_math
     
     if "completions" not in kwargs or "solution" not in kwargs:
         raise ValueError("kwargs 必须包含 'completions' 和 'solution'")
@@ -118,57 +120,18 @@ def good_accuracy(
 
     for content, sol in zip(contents, solution):
         is_correct = False
-        processed_sol = sol  # 默认使用原始 sol
-
-        # --- 核心修改：如果是纯数字，用花括号包装 ---
-        if is_pure_numerical(sol):
-            processed_sol = f"{{{sol.strip()}}}"  # 例如 "0.5" -> "{0.5}"
-            print(f"Info: Wrapping numerical solution '{sol}' to '{processed_sol}' for parse/verify.")
-
-        # --- 统一使用原始的 parse/verify 逻辑 ---
+        
+        # 提取模型答案
+        extracted_answer = extract_boxed_answer(content)
+        
+        # 使用 VERL 的 prime_math 验证（基于 sympy）
         try:
-            # 使用 processed_sol (可能是原始的，可能是包装后的)
-            gold_parsed = parse(
-                processed_sol,
-                extraction_mode="first_match",
-                extraction_config=[LatexExtractionConfig()]
+            is_correct, format_correctness, _ = prime_math.compute_score(
+                model_output=extracted_answer,
+                ground_truth=sol
             )
-
-            if len(gold_parsed) != 0:
-                # 解析模型回答
-                answer_parsed = parse(
-                    content,
-                    extraction_config=[
-                        LatexExtractionConfig(
-                            normalization_config=NormalizationConfig(
-                                nits=False,
-                                malformed_operators=False,
-                                basic_latex=True,
-                                equations=True,
-                                boxed="all",
-                                units=True
-                            ),
-                            boxed_match_priority=0,
-                            try_extract_without_anchor=False
-                        )
-                    ],
-                    extraction_mode="first_match"
-                )
-                try:
-                    # 使用原始 verify 函数进行比较
-                    is_correct = verify(answer_parsed, gold_parsed)
-                except Exception as verify_err:
-                    print(f"验证失败 (统一逻辑): {verify_err}, 回答: {answer_parsed}, "
-                          f"基准: {gold_parsed} (来自: '{processed_sol}')")
-                    is_correct = False
-            else:
-                # 如果 parse(processed_sol) 失败
-                print(f"警告 (统一逻辑): 无法解析处理后的基准答案 '{processed_sol}' "
-                      f"(来自原始: '{sol}'), 视为正确。")
-                is_correct = True
-        except Exception as parse_err:
-            print(f"解析失败 (统一逻辑): {parse_err}, 回答: {content}, "
-                  f"处理后基准: {processed_sol} (来自原始: {sol})")
+        except Exception as e:
+            print(f"验证失败: {e}, 回答: {extracted_answer}, 基准: {sol}")
             is_correct = False
 
         # === Reward Calculation ===

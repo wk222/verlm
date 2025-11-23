@@ -182,7 +182,7 @@ trainer:
   
   # Nodes and GPUs
   nnodes: 1
-  n_gpus_per_node: 8
+  n_gpus_per_node: 4  # 4 GPUs for reproduction
 
 # WandB configuration
 wandb_config:

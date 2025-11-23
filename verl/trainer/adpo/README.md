@@ -88,6 +88,8 @@ python -m verl.trainer.main_adpo \
 
 ### 使用 good_accuracy 奖励
 
+**注意**: good_accuracy 现在使用 VERL 内置的 `prime_math`（基于 sympy），无需额外依赖！
+
 ```yaml
 # config/adpo_trainer.yaml
 custom_reward_function:
