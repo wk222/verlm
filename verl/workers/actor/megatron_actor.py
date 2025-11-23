@@ -38,6 +38,11 @@ from torch import nn
 
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+# Import ADPO core algorithms to register custom policy losses and advantage estimators
+try:
+    from verl.trainer.adpo import core_algos as adpo_core_algos  # noqa: F401
+except ImportError:
+    pass  # ADPO not installed or not needed
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits

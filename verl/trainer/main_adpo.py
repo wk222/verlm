@@ -31,6 +31,8 @@ from verl.trainer.main_ppo import (
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.adpo.ray_trainer import RayADPOTrainer
 from verl.trainer.adpo.reward import load_reward_manager
+# Import ADPO core algorithms to register the policy loss and advantage estimator
+from verl.trainer.adpo import core_algos as adpo_core_algos  # noqa: F401
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from omegaconf import OmegaConf

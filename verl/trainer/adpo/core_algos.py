@@ -28,7 +28,13 @@ from verl.utils import group_mean_std
 
 
 @register_adv_est("adpo")
-def compute_adpo_advantages(data, config):
+def compute_adpo_advantages(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    config: DictConfig,
+    index: Optional[torch.Tensor] = None,
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute ADPO advantages using group-wise normalization.
     
@@ -36,18 +42,36 @@ def compute_adpo_advantages(data, config):
     advantages = rewards - mean(rewards_per_group)
     
     Args:
-        data: DataProto containing rewards
+        token_level_rewards: Token-level rewards (shape: [batch_size, seq_len])
+        response_mask: Response mask (shape: [batch_size, seq_len])
         config: Algorithm configuration
+        index: Optional index array for grouping
+        **kwargs: Additional arguments for compatibility
         
     Returns:
-        data: Updated DataProto with advantages
+        advantages: Computed advantages (shape: [batch_size])
+        returns: Returns (same as rewards for ADPO)
     """
-    rewards = data.batch["rewards"]  # Shape: [batch_size]
-    num_generations = config.algorithm.get("num_generations", 8)
+    # Convert token-level rewards to sequence-level rewards
+    # Sum over valid tokens
+    rewards = (token_level_rewards * response_mask).sum(dim=-1)  # Shape: [batch_size]
+    
+    num_generations = config.get("num_generations", 8)
     
     # Reshape to [num_prompts, num_generations]
     batch_size = rewards.shape[0]
     num_prompts = batch_size // num_generations
+    
+    # Auto-truncate if not divisible
+    if batch_size % num_generations != 0:
+        valid_batch_size = (batch_size // num_generations) * num_generations
+        if valid_batch_size == 0:
+            # Return zero advantages
+            return torch.zeros_like(rewards), rewards
+        rewards = rewards[:valid_batch_size]
+        batch_size = valid_batch_size
+        num_prompts = batch_size // num_generations
+    
     rewards_reshaped = rewards.view(num_prompts, num_generations)
     
     # Compute group-wise mean
@@ -58,13 +82,15 @@ def compute_adpo_advantages(data, config):
     advantages = advantages_reshaped.view(-1)
     
     # Optional: Scale by std if configured
-    if config.algorithm.get("scale_rewards", "group") == "group":
+    if config.get("scale_rewards", "group") == "group":
         std_rewards = rewards_reshaped.std(dim=1, keepdim=True)
         advantages_reshaped = advantages_reshaped / (std_rewards + 1e-8)
         advantages = advantages_reshaped.view(-1)
     
-    data.batch["advantages"] = advantages
-    return data
+    # Returns are just the rewards for ADPO
+    returns = rewards
+    
+    return advantages, returns
 
 
 @register_policy_loss("adpo")
@@ -103,15 +129,15 @@ def adpo_policy_loss(
     assert config is not None, "Config is required for ADPO loss"
     
     # Get ADPO config
-    tau = config.algorithm.get("tau", 0.8)
-    num_generations = config.algorithm.get("num_generations", 8)
-    use_q_centering = config.algorithm.get("use_q_centering", True)
-    beta_anchor_kl = config.algorithm.get("beta_anchor_kl", 0.0)
-    use_adaptive_tau = config.algorithm.get("use_adaptive_tau", True)
-    adaptive_tau_alpha = config.algorithm.get("adaptive_tau_alpha", 0.5)
-    adaptive_tau_min = config.algorithm.get("adaptive_tau_min", 0.05)
-    beta_reward = config.algorithm.get("beta_reward", 0.5)
-    drop_all_failed_prompts = config.algorithm.get("drop_all_failed_prompts", False)
+    tau = config.get("tau", 0.8)
+    num_generations = config.get("num_generations", 8)
+    use_q_centering = config.get("use_q_centering", True)
+    beta_anchor_kl = config.get("beta_anchor_kl", 0.0)
+    use_adaptive_tau = config.get("use_adaptive_tau", True)
+    adaptive_tau_alpha = config.get("adaptive_tau_alpha", 0.5)
+    adaptive_tau_min = config.get("adaptive_tau_min", 0.05)
+    beta_reward = config.get("beta_reward", 0.5)
+    drop_all_failed_prompts = config.get("drop_all_failed_prompts", False)
     
     # Compute sequence-level log probs by summing over tokens
     sequence_logps = (log_prob * response_mask).sum(dim=-1)  # [batch_size]

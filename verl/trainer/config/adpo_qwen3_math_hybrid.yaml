@@ -1,6 +1,7 @@
-# ADPO Training Configuration - Qwen3 on MATH Dataset
-# Based on Open-R1 ADPO baseline configuration
+# ADPO Training Configuration - Qwen3 on MATH Dataset (HYBRID Mode)
+# HYBRID Mode: vLLM and FSDP Actor share GPUs with sleep/wake mechanism
 # Dataset: MATH-lighteval-level_3
+# Memory-efficient setup for limited GPU resources
 
 defaults:
   - adpo_trainer
@@ -11,11 +12,14 @@ actor_rollout_ref:
     path: Qwen/Qwen3-1.7B
     # use_shm: false
   
+  # Hybrid engine enabled - rollout and training share GPUs
+  hybrid_engine: true
+  
   actor:
     # Training strategy: fsdp or fsdp2
     strategy: fsdp
     
-    # Batch size configuration (reduced for memory efficiency)
+    # Batch size configuration - reduced for memory
     ppo_micro_batch_size_per_gpu: 4
     
     # FSDP configuration
@@ -38,16 +42,22 @@ actor_rollout_ref:
     # Rollout engine: vllm/hf/sglang
     name: vllm
     
-    # vLLM configuration
+    # vLLM configuration - async mode with free_cache_engine for HYBRID
     mode: async
     
-    # GPU memory utilization for vLLM (with 2-GPU tensor parallel)
-    gpu_memory_utilization: 0.85
+    # Free cache engine to enable GPU sharing (HYBRID mode)
+    free_cache_engine: true
     
-    # Model parallelism (2 GPUs for vLLM rollout)
-    tensor_model_parallel_size: 2
+    # GPU memory utilization - reduced for hybrid mode stability
+    gpu_memory_utilization: 0.65
     
-    # Batch size for log probability computation (reduced for memory)
+    # Model parallelism - 1 GPU per replica in HYBRID mode
+    tensor_model_parallel_size: 1
+    
+    # Data parallel size - must be 1 for HYBRID mode
+    data_parallel_size: 1
+    
+    # Batch size for log probability computation - reduced
     log_prob_micro_batch_size_per_gpu: 4
     
     # Generation parameters
@@ -56,6 +66,12 @@ actor_rollout_ref:
     top_k: -1
     prompt_length: 1024  # Must match max_prompt_length
     response_length: 1024  # Must match max_response_length
+    
+    # Enable prefix caching for efficiency
+    enable_prefix_caching: false
+    
+    # Enforce eager mode for compatibility
+    enforce_eager: false
 
 # Data configuration
 data:
@@ -128,18 +144,18 @@ reward_model:
 trainer:
   # Project and experiment name
   project_name: open-r1-ADPO
-  experiment_name: qwen3-1.7b-adpo-baseline
+  experiment_name: qwen3-1.7b-adpo-hybrid
   
   # Training parameters
   total_epochs: 2
   total_training_steps: null
   
-  # Batch size (reduced to accommodate memory constraints)
+  # Batch size - reduced for memory constraints
   per_device_train_batch_size: 4
   per_device_eval_batch_size: 4
   
-  # Gradient accumulation
-  gradient_accumulation_steps: 16
+  # Gradient accumulation - increased to compensate for smaller batch
+  gradient_accumulation_steps: 32
   
   # Gradient checkpointing
   gradient_checkpointing: true
@@ -154,7 +170,7 @@ trainer:
   lr_scheduler_type: cosine
   warmup_ratio: 0.1
   
-  # Evaluation
+  # Evaluationwar
   do_eval: true
   eval_strategy: epoch
   
@@ -171,7 +187,7 @@ trainer:
   logging_steps: 1
   
   # Output directory
-  default_local_dir: data/Qwen3-1.7B-Open-R1-ADPO
+  default_local_dir: data/Qwen3-1.7B-Open-R1-ADPO-Hybrid
   
   # Hub
   push_to_hub: false
@@ -184,9 +200,9 @@ trainer:
   dataloader_drop_last: true
   dataloader_num_workers: 0
   
-  # Nodes and GPUs
+  # Nodes and GPUs - all 4 GPUs shared between actor and rollout
   nnodes: 1
-  n_gpus_per_node: 4  # 4 GPUs for reproduction
+  n_gpus_per_node: 4
   
   # Device
   device: cuda
@@ -234,13 +250,14 @@ trainer:
 wandb_config:
   project: open-r1-ADPO
   entity: null
-  name: qwen3-1.7b-adpo-baseline
-  group: qwen3_adpo_baseline
+  name: qwen3-1.7b-adpo-hybrid
+  group: qwen3_adpo_hybrid
   tags:
     - adpo
     - qwen3
     - math
     - reasoning
+    - hybrid-mode
 
 # Ray configuration
 ray_kwargs:

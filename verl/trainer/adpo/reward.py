@@ -75,56 +75,38 @@ def good_accuracy(
     - 使用 VERL 的 prime_math.compute_score 进行数学等价性验证
     - 对错误答案应用 N-gram 重复惩罚
     - 不需要额外的依赖（latex2sympy2_extended）
+    
+    支持两种调用模式：
+    1. 单个样本（NaiveRewardLoopManager）：
+       - solution_str: 单个生成的文本
+       - ground_truth: 单个答案
+    2. 批处理（BatchRewardManager）：
+       - completions: 多个生成的列表
+       - solution: ground truth 列表
 
     参数:
         ngram_size: 用于计算重复惩罚的n-gram大小。
         max_penalty: 最大的（负数）重复惩罚值。
         penalty_scale_factor: 当答案错误时，应用于重复惩罚的缩放因子 (默认为 0.1)。
-        **kwargs: Trainer 传入的数据集列, 必须包含 "completions" 和 "solution"。
+        **kwargs: Trainer 传入的数据集列。
 
     返回:
-        list[float]: 每个 completion 对应的奖励值列表。
+        float 或 list[float]: 奖励值（单个或列表）。
     """
     # 导入 VERL 自带的数学验证工具
     from verl.utils.reward_score import prime_math
     
-    if "completions" not in kwargs or "solution" not in kwargs:
-        raise ValueError("kwargs 必须包含 'completions' 和 'solution'")
-
-    completions = kwargs["completions"]
-    solution = kwargs["solution"]
-
-    if max_penalty > 0:
-        raise ValueError(f"max_penalty {max_penalty} 应该是负数或零")
-
-    final_rewards = []
-
-    # --- Input Format Handling ---
-    try:
-        contents = [comp[0]["content"] for comp in completions]
-    except (TypeError, IndexError, KeyError):
-        if isinstance(completions, list) and all(isinstance(c, str) for c in completions):
-            contents = completions
-        else:
-            raise ValueError("无法识别 completions 的格式 (既不是 list[str] 也不是 list[list[dict]])")
-    
-    if len(contents) != len(solution):
-        raise ValueError(f"completions ({len(contents)}) 和 solution ({len(solution)}) 的数量必须匹配")
-
-    # --- N-gram Helper ---
-    def zipngram(text: str, n: int):
-        words = text.lower().split()
-        if len(words) < n:
-            return []
-        return zip(*[words[i:] for i in range(n)])
-
-    for content, sol in zip(contents, solution):
-        is_correct = False
+    # 检测调用模式
+    if "solution_str" in kwargs and "ground_truth" in kwargs:
+        # 模式 1: NaiveRewardLoopManager (单个样本)
+        content = kwargs["solution_str"]
+        sol = kwargs["ground_truth"]
         
         # 提取模型答案
         extracted_answer = extract_boxed_answer(content)
         
         # 使用 VERL 的 prime_math 验证（基于 sympy）
+        is_correct = False
         try:
             is_correct, format_correctness, _ = prime_math.compute_score(
                 model_output=extracted_answer,
@@ -158,7 +140,73 @@ def good_accuracy(
             final_reward = 0.0 + penalty_scale_factor * repetition_penalty
             final_reward = min(final_reward, 0.0)
 
-        final_rewards.append(final_reward)
+        return {"score": final_reward, "acc": 1.0 if is_correct else 0.0}
+        
+    elif "completions" in kwargs and "solution" in kwargs:
+        # 模式 2: BatchRewardManager (批处理)
+        completions = kwargs["completions"]
+        solution = kwargs["solution"]
+        
+        if max_penalty > 0:
+            raise ValueError(f"max_penalty {max_penalty} 应该是负数或零")
 
-    return final_rewards
+        final_rewards = []
+
+        # --- Input Format Handling ---
+        try:
+            contents = [comp[0]["content"] for comp in completions]
+        except (TypeError, IndexError, KeyError):
+            if isinstance(completions, list) and all(isinstance(c, str) for c in completions):
+                contents = completions
+            else:
+                raise ValueError("无法识别 completions 的格式 (既不是 list[str] 也不是 list[list[dict]])")
+        
+        if len(contents) != len(solution):
+            raise ValueError(f"completions ({len(contents)}) 和 solution ({len(solution)}) 的数量必须匹配")
+
+        for content, sol in zip(contents, solution):
+            is_correct = False
+            
+            # 提取模型答案
+            extracted_answer = extract_boxed_answer(content)
+            
+            # 使用 VERL 的 prime_math 验证（基于 sympy）
+            try:
+                is_correct, format_correctness, _ = prime_math.compute_score(
+                    model_output=extracted_answer,
+                    ground_truth=sol
+                )
+            except Exception as e:
+                print(f"验证失败: {e}, 回答: {extracted_answer}, 基准: {sol}")
+                is_correct = False
+
+            # === Reward Calculation ===
+            final_reward = 0.0
+            if is_correct:
+                final_reward = 1.0
+            else:
+                # 计算重复惩罚
+                repetition_penalty = 0.0
+                words_in_content = content.lower().split()
+                if content and len(words_in_content) >= ngram_size:
+                    try:
+                        ngrams_set = set()
+                        total_ngrams = 0
+                        for ng in zip(*[words_in_content[i:] for i in range(ngram_size)]):
+                            ngrams_set.add(ng)
+                            total_ngrams += 1
+                        if total_ngrams > 0:
+                            scaling = 1.0 - (len(ngrams_set) / total_ngrams)
+                            repetition_penalty = scaling * max_penalty
+                    except Exception as e:
+                        print(f"计算重复惩罚时出错: {e}")
+                        repetition_penalty = 0.0
+                final_reward = 0.0 + penalty_scale_factor * repetition_penalty
+                final_reward = min(final_reward, 0.0)
+
+            final_rewards.append(final_reward)
+
+        return final_rewards
+    else:
+        raise ValueError("kwargs 必须包含 ('solution_str' 和 'ground_truth') 或 ('completions' 和 'solution')")
 

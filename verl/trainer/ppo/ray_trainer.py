@@ -43,6 +43,11 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+# Import ADPO core algorithms to register custom advantage estimators
+try:
+    from verl.trainer.adpo import core_algos as adpo_core_algos  # noqa: F401
+except ImportError:
+    pass  # ADPO not installed or not needed
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
