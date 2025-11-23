@@ -15,10 +15,8 @@ actor_rollout_ref:
     # Training strategy: fsdp or fsdp2
     strategy: fsdp
     
-    # Model initialization kwargs
-    model_init_kwargs:
-      torch_dtype: bfloat16
-      attn_implementation: flash_attention_2
+    # Batch size configuration
+    ppo_micro_batch_size_per_gpu: 8
     
     # Optimizer configuration
     optim:
@@ -28,30 +26,35 @@ actor_rollout_ref:
     use_kl_loss: false
   
   rollout:
+    # Rollout engine: vllm/hf/sglang
+    name: vllm
+    
     # vLLM configuration
     mode: async
     
-    # vLLM settings
-    use_vllm: true
-    vllm_mode: colocate
-    vllm_enable_sleep_mode: true
-    vllm_gpu_memory_utilization: 0.4
-    vllm_tensor_parallel_size: 1
+    # GPU memory utilization for vLLM
+    gpu_memory_utilization: 0.4
+    
+    # Model parallelism
+    tensor_model_parallel_size: 1
+    
+    # Batch size for log probability computation
+    log_prob_micro_batch_size_per_gpu: 8
     
     # Generation parameters
     temperature: 1.0
     top_p: 1.0
-    top_k: null
-    max_prompt_length: 512
-    max_completion_length: 1024
+    top_k: -1
+    prompt_length: 512
+    response_length: 1024
 
 # Data configuration
 data:
-  # Dataset
+  # Dataset - using local preprocessed MATH Level 3 dataset
   train_files:
-    - hf://watermelonhjg/MATH-lighteval-level_3/train
+    - /root/data/math_level3/train.parquet
   val_files:
-    - hf://watermelonhjg/MATH-lighteval-level_3/validation
+    - /root/data/math_level3/test.parquet
   
   # Prompt column
   prompt_key: problem
@@ -115,10 +118,7 @@ custom_reward_function:
 
 reward_model:
   enable: false
-  reward_kwargs:
-    ngram_size: 4
-    max_penalty: -0.5
-    penalty_scale_factor: 0.1
+  reward_kwargs: {}
 
 # Trainer configuration
 trainer:
@@ -183,6 +183,9 @@ trainer:
   # Nodes and GPUs
   nnodes: 1
   n_gpus_per_node: 4  # 4 GPUs for reproduction
+  
+  # Device
+  device: cuda
 
 # WandB configuration
 wandb_config:

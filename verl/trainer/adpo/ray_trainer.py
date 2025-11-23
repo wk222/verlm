@@ -67,8 +67,10 @@ class RayADPOTrainer(RayPPOTrainer):
                       f"Current: {self.config.algorithm.adv_estimator}")
         
         # Set default ADPO algorithm config if not present
+        from omegaconf import open_dict
+        
         algo_config = self.config.algorithm
-        with self.config:
+        with open_dict(self.config):
             if not hasattr(algo_config, 'tau'):
                 algo_config.tau = 0.8
             if not hasattr(algo_config, 'anchor_update_mode'):

@@ -29,13 +29,26 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3  # 4 GPUs
 # Configuration
 CONFIG_NAME="adpo_qwen3_math"
 OUTPUT_DIR="data/Qwen3-1.7B-Open-R1-ADPO"
+DATA_DIR="$HOME/data/math_level3"
 N_GPUS=4
 
 echo "Configuration:"
 echo "  - Config: ${CONFIG_NAME}"
 echo "  - Output: ${OUTPUT_DIR}"
+echo "  - Data: ${DATA_DIR}"
 echo "  - GPUs: ${CUDA_VISIBLE_DEVICES} (${N_GPUS} GPUs)"
 echo ""
+
+# Download and preprocess MATH Level 3 dataset if not exists
+if [ ! -f "${DATA_DIR}/train.parquet" ]; then
+    echo "📥 Downloading MATH Level 3 dataset..."
+    python3 examples/data_preprocess/math_level3_dataset.py \
+        --local_save_dir ${DATA_DIR}
+    echo ""
+else
+    echo "✅ MATH Level 3 dataset already exists at ${DATA_DIR}"
+    echo ""
+fi
 
 # Dependencies are handled by VERL's prime_math (sympy-based)
 echo "✅ Using VERL's built-in sympy-based math verification"
