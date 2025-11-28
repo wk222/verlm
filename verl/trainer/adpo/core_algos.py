@@ -162,14 +162,11 @@ def adpo_policy_loss(
     sequence_logps_reshaped = sequence_logps.view(num_prompts, num_generations)
     anchor_sequence_logps_reshaped = anchor_sequence_logps.view(num_prompts, num_generations)
     
-    # Compute q_target: normalized softmax of advantages
-    # Normalize: (R - mean) / (std + eps)
-    mean_adv = advantages_reshaped.mean(dim=1, keepdim=True)
-    std_adv = advantages_reshaped.std(dim=1, keepdim=True)
-    advantages_norm = (advantages_reshaped - mean_adv) / (std_adv + 1e-8)
-    
-    # q = softmax(R_norm / beta_reward)
-    q_target = F.softmax(advantages_norm / beta_reward, dim=-1)
+    # Compute q_target: softmax of advantages (without normalization)
+    # Q centralization (mean subtraction and std division) was removed to use raw advantages.
+    # Note: beta_reward controls the temperature and should be tuned based on the advantage scale.
+    # q = softmax(R / beta_reward)
+    q_target = F.softmax(advantages_reshaped / beta_reward, dim=-1)
     
     # Compute adaptive temperature if enabled
     # Note: tau is treated as a hyperparameter, not a learned parameter,
