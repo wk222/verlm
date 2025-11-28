@@ -162,7 +162,9 @@ def adpo_policy_loss(
     sequence_logps_reshaped = sequence_logps.view(num_prompts, num_generations)
     anchor_sequence_logps_reshaped = anchor_sequence_logps.view(num_prompts, num_generations)
     
-    # Compute q_target: softmax of advantages
+    # Compute q_target: softmax of advantages (without normalization)
+    # Q centralization (mean subtraction and std division) was removed to use raw advantages.
+    # Note: beta_reward controls the temperature and should be tuned based on the advantage scale.
     # q = softmax(R / beta_reward)
     q_target = F.softmax(advantages_reshaped / beta_reward, dim=-1)
     
