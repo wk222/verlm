@@ -52,26 +52,27 @@ def compute_adpo_advantages(
         
     Returns:
         advantages: Computed advantages (shape: [batch_size])
-        returns: Returns (same as rewards for ADPO)
+        returns: Returns for value function (same as sequence-level rewards for ADPO)
     """
     with torch.no_grad():
         # Convert token-level rewards to sequence-level rewards
         # Sum over valid tokens - use in-place multiplication for memory efficiency
-        rewards = (token_level_rewards * response_mask).sum(dim=-1)  # Shape: [batch_size]
+        sequence_rewards = (token_level_rewards * response_mask).sum(dim=-1)  # Shape: [batch_size]
         
         num_generations = config.get("num_generations", 8)
-        batch_size = rewards.shape[0]
+        batch_size = sequence_rewards.shape[0]
         
         # Auto-truncate if not divisible
         if batch_size % num_generations != 0:
             valid_batch_size = (batch_size // num_generations) * num_generations
             if valid_batch_size == 0:
-                return torch.zeros_like(rewards), rewards
-            rewards = rewards[:valid_batch_size]
+                returns = sequence_rewards
+                return torch.zeros_like(returns), returns
+            sequence_rewards = sequence_rewards[:valid_batch_size]
             batch_size = valid_batch_size
         
         num_prompts = batch_size // num_generations
-        rewards_reshaped = rewards.view(num_prompts, num_generations)
+        rewards_reshaped = sequence_rewards.view(num_prompts, num_generations)
         
         # Compute group-wise mean and advantages in-place where possible
         mean_rewards = rewards_reshaped.mean(dim=1, keepdim=True)
@@ -83,8 +84,9 @@ def compute_adpo_advantages(
             advantages_reshaped = advantages_reshaped / (std_rewards + 1e-8)
         
         advantages = advantages_reshaped.view(-1)
+        returns = sequence_rewards
         
-    return advantages, rewards
+    return advantages, returns
 
 
 @register_policy_loss("adpo")
@@ -170,6 +172,8 @@ def adpo_policy_loss(
     q_target = F.softmax(advantages_norm / beta_reward, dim=-1)
     
     # Compute adaptive temperature if enabled
+    # Note: tau is treated as a hyperparameter, not a learned parameter,
+    # so we compute it without gradients. Gradients flow through log_prob.
     if use_adaptive_tau:
         with torch.no_grad():
             # H(q) - entropy of target distribution
