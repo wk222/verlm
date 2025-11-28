@@ -79,6 +79,21 @@ class RayADPOTrainer(RayPPOTrainer):
                 algo_config.beta_anchor_kl = 0.0
             if not hasattr(algo_config, 'drop_all_failed_prompts'):
                 algo_config.drop_all_failed_prompts = False
+            if not hasattr(algo_config, 'adaptive_tau_beta'):
+                algo_config.adaptive_tau_beta = 0.5
+            if not hasattr(algo_config, 'adaptive_tau_max'):
+                algo_config.adaptive_tau_max = 1.0
+            
+            # Inject vocab_size for entropy normalization
+            if not hasattr(algo_config, 'vocab_size'):
+                tokenizer = kwargs.get('tokenizer')
+                if tokenizer:
+                    algo_config.vocab_size = tokenizer.vocab_size
+                else:
+                    # Fallback if tokenizer not in kwargs (though it should be)
+                    algo_config.vocab_size = 32000  # Default fallback
+                    print("Warning: Tokenizer not found in kwargs, using default vocab_size=32000 for ADPO entropy norm.")
+
         
         print(f"[ADPO] Initialized with tau={algo_config.tau}, "
               f"use_adaptive_tau={algo_config.use_adaptive_tau}")

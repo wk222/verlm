@@ -66,32 +66,26 @@ def extract_boxed_answer(text: str) -> str:
 def good_accuracy(
     ngram_size: int = 4,
     max_penalty: float = -0.5,
-    penalty_scale_factor: float = 0.1,
+    penalty_scale_factor: float = 0.5,
+    length_reward_scale: float = 2000.0,
+    length_reward_max: float = 0.1,
+    repetition_threshold: float = 0.3,
+    repetition_threshold_penalty: float = -0.5,
     **kwargs
 ):
     """
-    计算组合奖励（使用 VERL 自带的 sympy 验证方法）。
+    计算组合奖励 (Improved Good Accuracy):
+    1. 正确 = 1.0
+    2. 错误 = 软长度奖励 (防止闭嘴) + 重复性惩罚 (防止废话)
     
-    - 使用 VERL 的 prime_math.compute_score 进行数学等价性验证
-    - 对错误答案应用 N-gram 重复惩罚
-    - 不需要额外的依赖（latex2sympy2_extended）
-    
-    支持两种调用模式：
-    1. 单个样本（NaiveRewardLoopManager）：
-       - solution_str: 单个生成的文本
-       - ground_truth: 单个答案
-    2. 批处理（BatchRewardManager）：
-       - completions: 多个生成的列表
-       - solution: ground truth 列表
-
-    参数:
-        ngram_size: 用于计算重复惩罚的n-gram大小。
-        max_penalty: 最大的（负数）重复惩罚值。
-        penalty_scale_factor: 当答案错误时，应用于重复惩罚的缩放因子 (默认为 0.1)。
-        **kwargs: Trainer 传入的数据集列。
-
-    返回:
-        float 或 list[float]: 奖励值（单个或列表）。
+    Args:
+        ngram_size: N-gram 大小
+        max_penalty: 最大惩罚值 (负数)
+        penalty_scale_factor: 重复惩罚的缩放因子
+        length_reward_scale: 长度奖励分母
+        length_reward_max: 长度奖励上限
+        repetition_threshold: 重复率阈值
+        repetition_threshold_penalty: 超过阈值的固定惩罚
     """
     # 导入 VERL 自带的数学验证工具
     from verl.utils.reward_score import prime_math
@@ -105,7 +99,7 @@ def good_accuracy(
         # 提取模型答案
         extracted_answer = extract_boxed_answer(content)
         
-        # 使用 VERL 的 prime_math 验证（基于 sympy）
+        # 使用 VERL 的 prime_math 验证
         is_correct = False
         try:
             is_correct, format_correctness, _ = prime_math.compute_score(
@@ -121,8 +115,13 @@ def good_accuracy(
         if is_correct:
             final_reward = 1.0
         else:
-            # 计算重复惩罚
+            # A. 软长度奖励
+            length_score = min(len(content) / length_reward_scale, length_reward_max)
+            
+            # B. 重复性惩罚
             repetition_penalty = 0.0
+            hit_repetition_threshold = False
+            
             words_in_content = content.lower().split()
             if content and len(words_in_content) >= ngram_size:
                 try:
@@ -132,13 +131,26 @@ def good_accuracy(
                         ngrams_set.add(ng)
                         total_ngrams += 1
                     if total_ngrams > 0:
-                        scaling = 1.0 - (len(ngrams_set) / total_ngrams)
-                        repetition_penalty = scaling * max_penalty
+                        ratio = len(ngrams_set) / total_ngrams
+                        scaling = 1.0 - ratio # 1.0 means full repetition
+                        
+                        if scaling > repetition_threshold:
+                            hit_repetition_threshold = True
+                        else:
+                            repetition_penalty = scaling * max_penalty
                 except Exception as e:
                     print(f"计算重复惩罚时出错: {e}")
                     repetition_penalty = 0.0
-            final_reward = 0.0 + penalty_scale_factor * repetition_penalty
-            final_reward = min(final_reward, 0.0)
+            
+            if hit_repetition_threshold:
+                final_reward = repetition_threshold_penalty
+            else:
+                final_reward = length_score + repetition_penalty * penalty_scale_factor
+                # 确保不超过 0 (虽然 length_score 是正的，但通常我们希望错误答案总分 <= 0 或者很小)
+                # OPENR1 逻辑是 length_score + penalty。如果 length_score > penalty，可能是正分。
+                # 这里保留 OPENR1 的原意：允许微小的正分鼓励输出，或者我们限制它。
+                # 用户说“避免闭口”，所以微小正分是可以接受的。
+                pass
 
         return {"score": final_reward, "acc": 1.0 if is_correct else 0.0}
         
@@ -185,8 +197,13 @@ def good_accuracy(
             if is_correct:
                 final_reward = 1.0
             else:
-                # 计算重复惩罚
+                # A. 软长度奖励
+                length_score = min(len(content) / length_reward_scale, length_reward_max)
+                
+                # B. 重复性惩罚
                 repetition_penalty = 0.0
+                hit_repetition_threshold = False
+                
                 words_in_content = content.lower().split()
                 if content and len(words_in_content) >= ngram_size:
                     try:
@@ -196,13 +213,21 @@ def good_accuracy(
                             ngrams_set.add(ng)
                             total_ngrams += 1
                         if total_ngrams > 0:
-                            scaling = 1.0 - (len(ngrams_set) / total_ngrams)
-                            repetition_penalty = scaling * max_penalty
+                            ratio = len(ngrams_set) / total_ngrams
+                            scaling = 1.0 - ratio
+                            
+                            if scaling > repetition_threshold:
+                                hit_repetition_threshold = True
+                            else:
+                                repetition_penalty = scaling * max_penalty
                     except Exception as e:
                         print(f"计算重复惩罚时出错: {e}")
                         repetition_penalty = 0.0
-                final_reward = 0.0 + penalty_scale_factor * repetition_penalty
-                final_reward = min(final_reward, 0.0)
+                
+                if hit_repetition_threshold:
+                    final_reward = repetition_threshold_penalty
+                else:
+                    final_reward = length_score + repetition_penalty * penalty_scale_factor
 
             final_rewards.append(final_reward)
 

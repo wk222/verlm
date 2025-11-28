@@ -176,13 +176,67 @@ def adpo_policy_loss(
     # so we compute it without gradients. Gradients flow through log_prob.
     if use_adaptive_tau:
         with torch.no_grad():
-            # H(q) - entropy of target distribution
-            entropy = -(q_target * torch.log(q_target + 1e-8)).sum(dim=-1)
-            max_entropy = torch.log(torch.tensor(num_generations, dtype=q_target.dtype, device=q_target.device))
+            # ========================================
+            # Smooth Hybrid Adaptive Temperature Scaling
+            # ========================================
+            # Formula: τ = τ_base × (1 + α·H_norm + β·(1-H_norm)·(1-R_norm))
             
-            # tau(x) = max(tau_min, tau_base * (1 - alpha * H/H_max))
-            adaptive_factor = 1.0 - adaptive_tau_alpha * (entropy / max_entropy)
-            current_tau = torch.clamp(tau * adaptive_factor, min=adaptive_tau_min).unsqueeze(-1)
+            # 1. Estimate Model Entropy (H) using -log_prob of sampled tokens
+            # H ≈ -1/T * sum(log p(x_t))
+            # This is a proxy for model uncertainty (on-policy approximation)
+            token_entropy = -log_prob * response_mask
+            mean_token_entropy = token_entropy.sum(dim=-1) / response_mask.sum(dim=-1).clamp(min=1.0) # [B]
+            
+            # Reshape to groups
+            mean_token_entropy_grouped = mean_token_entropy.view(num_prompts, num_generations).mean(dim=1) # [B_prompts]
+            
+            # Normalize Entropy (H_norm)
+            # H_norm = H / log(vocab_size)
+            vocab_size = config.get("vocab_size", 32000)
+            max_token_entropy = torch.log(torch.tensor(vocab_size, dtype=mean_token_entropy.dtype, device=mean_token_entropy.device))
+            normalized_entropy = (mean_token_entropy_grouped / max_token_entropy).clamp(0, 1) # [B_prompts]
+            
+            # 2. Normalize Rewards (R_norm)
+            if "rewards" in kwargs:
+                rewards = kwargs["rewards"]
+                # Ensure rewards match batch size (in case of truncation)
+                if rewards.shape[0] != batch_size:
+                     rewards = rewards[:batch_size]
+                
+                rewards_grouped = rewards.view(num_prompts, num_generations)
+                mean_rewards = rewards_grouped.mean(dim=1) # [B_prompts]
+                
+                # Min-max normalization within batch
+                r_min, r_max = mean_rewards.min(), mean_rewards.max()
+                if r_max > r_min + 1e-6:
+                    normalized_reward = (mean_rewards - r_min) / (r_max - r_min)
+                else:
+                    normalized_reward = torch.full_like(mean_rewards, 0.5)
+                normalized_reward = normalized_reward.clamp(0, 1)
+            else:
+                # Fallback if rewards not available (should not happen in standard loop)
+                normalized_reward = torch.full_like(normalized_entropy, 0.5)
+            
+            # 3. Compute Terms
+            # confidence = 1 - H_norm (high when model is certain)
+            # error = 1 - R_norm (high when rewards are low)
+            confidence = (1.0 - normalized_entropy).clamp(min=0)
+            error = (1.0 - normalized_reward).clamp(min=0)
+            
+            # Uncertainty term: protects against high entropy (confused model)
+            uncertainty_term = adaptive_tau_alpha * normalized_entropy
+            
+            # Penalty term: punishes confident but wrong predictions (arrogant idiot)
+            adaptive_tau_beta = config.get("adaptive_tau_beta", 0.5)
+            penalty_term = adaptive_tau_beta * confidence * error
+            
+            # 4. Final Adaptive Tau
+            adaptive_tau_max = config.get("adaptive_tau_max", 5.0)
+            current_tau = tau * (1.0 + uncertainty_term + penalty_term)
+            current_tau = torch.clamp(current_tau, min=adaptive_tau_min, max=adaptive_tau_max)
+            
+            # Broadcast to [B_prompts, 1] to match sequence_logps_reshaped [B_prompts, num_generations]
+            current_tau = current_tau.unsqueeze(-1)
     else:
         current_tau = tau
     
@@ -229,6 +283,9 @@ def adpo_policy_loss(
         }
         if use_adaptive_tau:
             metrics["adpo/mean_tau"] = current_tau.mean().item() if isinstance(current_tau, torch.Tensor) else current_tau
+            metrics["adpo/entropy_norm_mean"] = normalized_entropy.mean().item()
+            metrics["adpo/reward_norm_mean"] = normalized_reward.mean().item()
+            metrics["adpo/penalty_term_mean"] = penalty_term.mean().item()
         if kl_loss is not None:
             metrics["adpo/kl_penalty"] = kl_loss.item()
         if valid_mask is not None:

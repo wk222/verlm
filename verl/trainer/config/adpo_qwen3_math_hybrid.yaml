@@ -1,280 +1,91 @@
-# ADPO Training Configuration - Qwen3 on MATH Dataset (HYBRID Mode)
-# HYBRID Mode: vLLM and FSDP Actor share GPUs with sleep/wake mechanism
-# Dataset: MATH-lighteval-level_3
-# Memory-efficient setup for limited GPU resources
+data:
+  train_files: $DATA_DIR/train.parquet
+  val_files: $DATA_DIR/test.parquet
+  prompt_key: problem
+  max_prompt_length: 700
+  max_response_length: 1200
+  train_batch_size: 8
+  val_batch_size: 8
+  return_raw_input_ids: False  # For vLLM rollout
+  return_raw_chat: False
 
-defaults:
-  - adpo_trainer
-
-# Model configuration
 actor_rollout_ref:
+  hybrid_engine: True
   model:
     path: Qwen/Qwen3-1.7B
-    # use_shm: false
-  
-  # Hybrid engine enabled - rollout and training share GPUs
-  hybrid_engine: true
-  
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: True
+    use_remove_padding: True
   actor:
-    # Training strategy: fsdp or fsdp2
-    strategy: fsdp
-    
-    # Batch size configuration - reduced for memory
-    ppo_micro_batch_size_per_gpu: 4
-    
-    # FSDP configuration
-    fsdp_config:
-      dtype: bfloat16
-      model_dtype: bfloat16  # Model initialization dtype
-    
-    # Optimizer configuration
+    strategy: fsap  # FSDP
+    ppd: 1
+    mpd: 1
     optim:
       lr: 1.5e-5
-    
-    # Policy loss configuration - IMPORTANT: Use ADPO loss for ADPO algorithm
-    policy_loss:
-      loss_mode: adpo
-      
-    # Use KL loss
-    use_kl_loss: false
-  
+    fsdp_config:
+      wrap_policy:
+        # Transformer layer wrapper
+        min_num_params: 0
+      param_offload: False
+      grad_offload: False
+      optimizer_offload: False
   rollout:
-    # Rollout engine: vllm/hf/sglang
-    name: vllm
-    
-    # vLLM configuration - async mode with free_cache_engine for HYBRID
-    mode: async
-    
-    # Free cache engine to enable GPU sharing (HYBRID mode)
-    free_cache_engine: true
-    
-    # GPU memory utilization - reduced for hybrid mode stability
-    gpu_memory_utilization: 0.65
-    
-    # Model parallelism - 1 GPU per replica in HYBRID mode
-    tensor_model_parallel_size: 1
-    
-    # Data parallel size - must be 1 for HYBRID mode
-    data_parallel_size: 1
-    
-    # Batch size for log probability computation - reduced
-    log_prob_micro_batch_size_per_gpu: 4
-    
-    # Generation parameters
     temperature: 1.0
+    top_k: -1 # 0 in some configs, -1 usually means disabled or all
     top_p: 1.0
-    top_k: -1
-    prompt_length: 1024  # Must match max_prompt_length
-    response_length: 1024  # Must match max_response_length
-    
-    # Enable prefix caching for efficiency
-    enable_prefix_caching: false
-    
-    # Enforce eager mode for compatibility
-    enforce_eager: false
+    n: 8 # num_generations
+    gpu_memory_utilization: 0.4
+    ignore_eos: False
+    enforce_eager: False
+    free_cache_after_step: True
+    do_sample: True
+  ref:
+    fsdp_config:
+      param_offload: True
+      grad_offload: True
+      optimizer_offload: True
+    log_prob_micro_batch_size: 4 # Adjust based on VRAM
 
-# Data configuration
-data:
-  # Dataset - using local preprocessed MATH Level 3 dataset
-  train_files:
-    - /root/data/math_level3/train.parquet
-  val_files:
-    - /root/data/math_level3/test.parquet
-  
-  # Prompt column (must match the column name in parquet files)
-  prompt_key: prompt
-  
-  # Maximum sequence lengths (unified to 1024 for MATH dataset)
-  max_prompt_length: 1024
-  max_response_length: 1024
-  
-  # System prompt (Note: instruction is already in the question)
-  system_prompt: null
-  
-  # Shuffling
-  shuffle: false
-  
-  # Trust remote code
-  trust_remote_code: true
-
-# ADPO Algorithm configuration (on-policy mode for memory efficiency)
 algorithm:
-  _target_: verl.trainer.config.AlgoConfig
-  
-  # Advantage estimator
   adv_estimator: adpo
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0 # beta_anchor_kl
   
-  # Number of generations per prompt
-  num_generations: 8
+  # ADPO Hyperparameters
+  tau: 1.0
+  use_adaptive_tau: True
+  adaptive_tau_alpha: 0.7
+  adaptive_tau_min: 0.3
+  adaptive_tau_beta: 0.5 # New param we added
+  adaptive_tau_max: 5.0 # New param we added
+  beta_reward: 0.8
+  drop_all_failed_prompts: False
   
-  # ADPO Core Parameters (on-policy mode uses old_log_prob as anchor)
-  tau: 0.8
-  beta_anchor_kl: 0.0
-  
-  # Adaptive Temperature
-  use_adaptive_tau: true
-  adaptive_tau_alpha: 1.0
-  adaptive_tau_min: 0.1
-  
-  # Q computation
-  beta_reward: 0.5
-  
-  # Reward scaling
-  scale_rewards: group
-  
-  # Drop failed prompts
-  drop_all_failed_prompts: false
-  
-  # KL penalty (disabled)
-  use_kl_in_reward: false
-  kl_penalty: kl
+  # Gradient Accumulation
+  global_batch_size: 64 # 8 * 8 = 64 (approx, adjust based on num_gpus)
 
-# Reward function configuration
-custom_reward_function:
-  path: verl/trainer/adpo/reward.py
-  name: good_accuracy
+trainer:
+  total_epochs: 2
+  project_name: open-r1-ADPO
+  experiment_name: qwen3-1.7b-adpo-baseline
+  logger: ['wandb', 'console']
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: -1
+  test_freq: 1
+  val_before_train: False
 
 reward_model:
-  enable: false
-  reward_kwargs: {}
-
-# Trainer configuration
-trainer:
-  # Project and experiment name
-  project_name: open-r1-ADPO
-  experiment_name: qwen3-1.7b-adpo-hybrid
-  
-  # Training parameters
-  total_epochs: 2
-  total_training_steps: null
-  
-  # Batch size - reduced for memory constraints
-  per_device_train_batch_size: 4
-  per_device_eval_batch_size: 4
-  
-  # Gradient accumulation - increased to compensate for smaller batch
-  gradient_accumulation_steps: 32
-  
-  # Gradient checkpointing
-  gradient_checkpointing: true
-  gradient_checkpointing_kwargs:
-    use_reentrant: false
-  
-  # Mixed precision
-  bf16: true
-  fp16: false
-  
-  # Learning rate scheduler
-  lr_scheduler_type: cosine
-  warmup_ratio: 0.1
-  
-  # Evaluationwar
-  do_eval: true
-  eval_strategy: epoch
-  
-  # Saving
-  save_strategy: epoch
-  save_total_limit: 2
-  save_freq: 1
-  
-  # Logging
-  logger: ["console", "wandb"]
-  log_completions: true
-  log_level: info
-  logging_first_step: true
-  logging_steps: 1
-  
-  # Output directory
-  default_local_dir: data/Qwen3-1.7B-Open-R1-ADPO-Hybrid
-  
-  # Hub
-  push_to_hub: false
-  hub_model_id: null
-  
-  # Seed
-  seed: 42
-  
-  # Dataloader
-  dataloader_drop_last: true
-  dataloader_num_workers: 0
-  
-  # Nodes and GPUs - all 4 GPUs shared between actor and rollout
-  nnodes: 1
-  n_gpus_per_node: 4
-  
-  # Device
-  device: cuda
-  
-  # Resume settings
-  resume_mode: auto  # auto/disable/resume_path
-  resume_from_path: null
-  
-  # Validation settings
-  val_before_train: true
-  val_only: false
-  test_freq: -1  # Validation frequency (in training iterations), -1 to disable
-  
-  # Critic warmup (number of iterations to warm up the critic before updating policy)
-  critic_warmup: 0
-  
-  # ESI redundant time
-  esi_redundant_time: 0
-  
-  # Checkpoint settings
-  default_hdfs_dir: null
-  del_local_ckpt_after_load: false
-  max_actor_ckpt_to_keep: null
-  max_critic_ckpt_to_keep: null
-  
-  # Ray settings
-  ray_wait_register_center_timeout: 300
-  
-  # Worker implementation mode
-  use_legacy_worker_impl: auto
-  
-  # Balance batch
-  balance_batch: true
-  
-  # Log validation generations
-  log_val_generations: 0
-  
-  # Rollout data directory (null to disable)
-  rollout_data_dir: null
-  
-  # Validation data directory (null to disable)
-  validation_data_dir: null
-
-# WandB configuration
-wandb_config:
-  project: open-r1-ADPO
-  entity: null
-  name: qwen3-1.7b-adpo-hybrid
-  group: qwen3_adpo_hybrid
-  tags:
-    - adpo
-    - qwen3
-    - math
-    - reasoning
-    - hybrid-mode
-
-# Ray configuration
-ray_kwargs:
-  ray_init:
-    runtime_env:
-      env_vars:
-        TOKENIZERS_PARALLELISM: "false"
-        NCCL_DEBUG: "WARN"
-        VLLM_LOGGING_LEVEL: "WARNING"
-    num_cpus: null
-
-# Transfer queue (disabled)
-transfer_queue:
-  enable: false
-
-# Global profiler (disabled)
-global_profiler:
-  tool: none
-  steps: []
-  profile_continuous_steps: false
-  save_path: "outputs/profile"
-
+  enable: True
+  reward_manager: custom
+  reward_kwargs:
+    mode: math_adpo # Points to our new reward file
+    ngram_size: 3
+    max_penalty: -1.0
+    penalty_scale_factor: 0.1
+    length_reward_scale: 2000.0
+    length_reward_max: 0.1
+    repetition_threshold: 0.3
+    repetition_threshold_penalty: -0.5
