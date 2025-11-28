@@ -21,6 +21,8 @@ actor_rollout_ref:
     strategy: fsap  # FSDP
     ppd: 1
     mpd: 1
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size: null
     optim:
       lr: 1.5e-5
     fsdp_config:
@@ -76,6 +78,8 @@ trainer:
   save_freq: -1
   test_freq: 1
   val_before_train: False
+  default_hdfs_dir: null
+  default_local_dir: null
 
 reward_model:
   enable: True
@@ -89,3 +93,27 @@ reward_model:
     length_reward_max: 0.1
     repetition_threshold: 0.3
     repetition_threshold_penalty: -0.5
+
+wandb_config:
+  project: open-r1-ADPO
+  entity: null
+  name: qwen3-1.7b-adpo-baseline
+  group: qwen3_adpo
+  tags:
+    - adpo
+    - qwen3
+    - math
+    - reasoning
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        TOKENIZERS_PARALLELISM: "false"
+        NCCL_DEBUG: "WARN"
+        VLLM_LOGGING_LEVEL: "WARNING"
+    num_cpus: null
+  timeline_json_file: null
+
+transfer_queue:
+  enable: False
