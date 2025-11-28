@@ -2,13 +2,20 @@
 ADPO Configuration Example
 
 This file demonstrates how to configure and use ADPO programmatically.
+ADPO uses on-policy anchoring (old_log_prob as anchor) for memory efficiency.
 """
 
 from omegaconf import OmegaConf
 
 
 def get_adpo_base_config():
-    """Get base ADPO configuration."""
+    """
+    Get base ADPO configuration.
+    
+    Uses on-policy anchoring where old_log_prob serves as the anchor.
+    This is the most memory-efficient approach as it doesn't require
+    maintaining a separate anchor model.
+    """
     config = OmegaConf.create({
         "algorithm": {
             "_target_": "verl.trainer.config.AlgoConfig",
@@ -28,19 +35,7 @@ def get_adpo_base_config():
             # Temperature for anchored softmax
             "tau": 0.8,
             
-            # Anchor update mode: "on_policy", "fixed", "ema", "kl_triggered"
-            "anchor_update_mode": "on_policy",
-            
-            # EMA coefficient (for ema mode)
-            "ema_alpha": 0.99,
-            
-            # KL threshold (for kl_triggered mode)
-            "kl_threshold": 0.1,
-            
             # ========== Loss Function Parameters ==========
-            # Whether to center advantages
-            "use_q_centering": True,
-            
             # KL penalty coefficient for anchor KL
             "beta_anchor_kl": 0.0,
             
@@ -99,51 +94,12 @@ def get_adpo_base_config():
 
 
 def get_adpo_on_policy_config():
-    """ADPO configuration with on-policy anchor (like GRPO)."""
+    """ADPO configuration with on-policy anchor (default, memory-efficient)."""
     config = get_adpo_base_config()
     
     with OmegaConf.open_dict(config):
-        config.algorithm.anchor_update_mode = "on_policy"
         config.algorithm.tau = 0.8
         config.trainer.experiment_name = "adpo_on_policy"
-    
-    return config
-
-
-def get_adpo_fixed_anchor_config():
-    """ADPO configuration with fixed anchor (standard ADPO)."""
-    config = get_adpo_base_config()
-    
-    with OmegaConf.open_dict(config):
-        config.algorithm.anchor_update_mode = "fixed"
-        config.algorithm.tau = 1.0
-        config.trainer.experiment_name = "adpo_fixed_anchor"
-    
-    return config
-
-
-def get_adpo_ema_config(ema_alpha=0.99):
-    """ADPO configuration with EMA anchor updates."""
-    config = get_adpo_base_config()
-    
-    with OmegaConf.open_dict(config):
-        config.algorithm.anchor_update_mode = "ema"
-        config.algorithm.ema_alpha = ema_alpha
-        config.algorithm.tau = 0.8
-        config.trainer.experiment_name = f"adpo_ema_alpha{int(ema_alpha*100)}"
-    
-    return config
-
-
-def get_adpo_kl_triggered_config(kl_threshold=0.1):
-    """ADPO configuration with KL-triggered anchor updates."""
-    config = get_adpo_base_config()
-    
-    with OmegaConf.open_dict(config):
-        config.algorithm.anchor_update_mode = "kl_triggered"
-        config.algorithm.kl_threshold = kl_threshold
-        config.algorithm.tau = 0.8
-        config.trainer.experiment_name = f"adpo_kl_thresh{kl_threshold}"
     
     return config
 
@@ -153,7 +109,6 @@ def get_adpo_with_good_accuracy_config():
     config = get_adpo_base_config()
     
     with OmegaConf.open_dict(config):
-        config.algorithm.anchor_update_mode = "on_policy"
         config.algorithm.tau = 0.8
         config.algorithm.drop_all_failed_prompts = True
         
@@ -172,14 +127,30 @@ def get_adpo_with_good_accuracy_config():
     return config
 
 
+def get_adpo_memory_optimized_config():
+    """ADPO configuration optimized for memory efficiency."""
+    config = get_adpo_base_config()
+    
+    with OmegaConf.open_dict(config):
+        # Smaller batch with gradient accumulation
+        config.algorithm.tau = 0.8
+        config.algorithm.use_adaptive_tau = True
+        
+        # Optimize memory
+        config.trainer.gradient_checkpointing = True
+        config.trainer.bf16 = True
+        
+        config.trainer.experiment_name = "adpo_memory_optimized"
+    
+    return config
+
+
 def example_usage():
     """Example of how to use these configurations."""
     # Choose a configuration
     config = get_adpo_on_policy_config()
-    # config = get_adpo_fixed_anchor_config()
-    # config = get_adpo_ema_config(ema_alpha=0.99)
-    # config = get_adpo_kl_triggered_config(kl_threshold=0.1)
     # config = get_adpo_with_good_accuracy_config()
+    # config = get_adpo_memory_optimized_config()
     
     # Customize as needed
     with OmegaConf.open_dict(config):

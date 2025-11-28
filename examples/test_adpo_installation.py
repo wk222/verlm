@@ -96,8 +96,6 @@ def test_examples():
     
     examples = [
         "examples/run_adpo_gsm8k.sh",
-        "examples/run_adpo_fixed_anchor.sh",
-        "examples/run_adpo_ema.sh",
         "examples/quickstart_adpo.sh",
         "examples/adpo_example_config.py",
     ]

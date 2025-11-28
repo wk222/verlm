@@ -97,7 +97,7 @@ data:
   # Trust remote code
   trust_remote_code: true
 
-# ADPO Algorithm configuration
+# ADPO Algorithm configuration (on-policy mode for memory efficiency)
 algorithm:
   _target_: verl.trainer.config.AlgoConfig
   
@@ -107,9 +107,8 @@ algorithm:
   # Number of generations per prompt
   num_generations: 8
   
-  # ADPO Core Parameters
+  # ADPO Core Parameters (on-policy mode uses old_log_prob as anchor)
   tau: 0.8
-  anchor_update_mode: on_policy
   beta_anchor_kl: 0.0
   
   # Adaptive Temperature
@@ -119,7 +118,6 @@ algorithm:
   
   # Q computation
   beta_reward: 0.5
-  use_q_centering: true
   
   # Reward scaling
   scale_rewards: group
