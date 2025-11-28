@@ -15,15 +15,22 @@
 # ADPO (Anchored Direct Preference Optimization) Algorithm
 # Original paper: https://arxiv.org/abs/2510.18913
 
-"""ADPO (Anchored Direct Preference Optimization) Trainer module."""
+"""
+ADPO (Anchored Direct Preference Optimization) Trainer module.
 
-from .core_algos import adpo_policy_loss
+This module implements ADPO using on-policy anchoring for memory efficiency.
+The on-policy mode uses old_log_prob as the anchor, eliminating the need
+for a separate anchor model.
+"""
+
+from .core_algos import adpo_policy_loss, compute_adpo_advantages
 from .ray_trainer import RayADPOTrainer
 from .reward import load_reward_manager
 
 __all__ = [
     "RayADPOTrainer",
     "adpo_policy_loss",
+    "compute_adpo_advantages",
     "load_reward_manager",
 ]
 

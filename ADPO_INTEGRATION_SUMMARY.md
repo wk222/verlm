@@ -4,6 +4,8 @@
 
 本文档总结了在 VERL 框架中添加 ADPO (Anchored Direct Preference Optimization) 训练器的所有更改。
 
+**当前版本使用 on-policy 模式**：`old_log_prob` 作为锚点，无需维护额外的锚点模型，内存效率高。
+
 ## 添加的文件
 
 ### 1. 核心训练器文件
@@ -19,7 +21,7 @@
 - **关键特性**：
   - 锚点分布计算：`p_θ(i|S) = softmax((s_i - s_anchor_i) / τ)`
   - 自适应温度缩放
-  - 组合多种锚点更新策略
+  - On-policy 锚点模式（使用 old_log_prob）
   - 可选 KL 惩罚
   - 自动批次截断（当批大小不是 num_generations 的倍数时）
 
@@ -27,26 +29,18 @@
 - **RayADPOTrainer** 类：继承自 `RayPPOTrainer`
 - **主要功能**：
   - 初始化 ADPO 特定配置
-  - 管理锚点策略更新
-  - 跟踪 KL 窗口和更新计数
+  - 使用 on-policy 锚点模式
 
 #### `verl/trainer/adpo/reward.py`
 - **奖励函数模块**
 - **主要函数**：
   - `load_reward_manager()`: 加载奖励管理器（包装 PPO 的实现）
   - `good_accuracy()`: 组合准确度奖励函数
-    - 使用 `parse`/`verify` 进行数学答案验证
-    - 纯数字答案自动包装
+    - 使用 VERL 内置的 `prime_math` 进行数学答案验证
     - N-gram 重复惩罚（对错误答案）
-- **依赖**：
-  - `latex2sympy2_extended`
-  - `math_verify`
 
 #### `verl/trainer/adpo/utils.py`
 - **工具函数集合**：
-  - `update_anchor_policy_ema()`: EMA 锚点更新
-  - `update_anchor_policy_hard_copy()`: 硬拷贝锚点更新
-  - `should_update_anchor_kl_triggered()`: KL 触发检查
   - `compute_adaptive_tau()`: 自适应温度计算
   - `log_adpo_metrics()`: ADPO 指标记录
 
@@ -71,9 +65,8 @@
     adv_estimator: adpo
     num_generations: 8
     
-    # ADPO 核心参数
+    # ADPO 核心参数 (on-policy 模式)
     tau: 0.8
-    anchor_update_mode: on_policy  # on_policy/fixed/ema/kl_triggered
     
     # 自适应温度
     use_adaptive_tau: True
@@ -82,7 +75,6 @@
     
     # 奖励计算
     beta_reward: 0.5
-    use_q_centering: True
     
     # 可选功能
     beta_anchor_kl: 0.0
@@ -97,7 +89,7 @@
   - ADPO 核心思想和算法
   - 快速开始指南
   - 完整参数说明
-  - 锚点更新模式详解
+  - 内存优化提示
   - 奖励函数使用指南
   - 与 GRPO 的对比
   - 常见问题解答
@@ -106,36 +98,22 @@
 - GSM8K 数据集上的基础 ADPO 训练示例
 - 使用 on-policy 锚点模式
 
-#### `examples/run_adpo_fixed_anchor.sh`
-- 固定锚点 ADPO 训练示例
-- 展示如何使用 good_accuracy 奖励
-- 启用失败样本丢弃
-
-#### `examples/run_adpo_ema.sh`
-- EMA 锚点更新示例
-- 展示如何调节 ema_alpha
-- 包含 KL 惩罚配置
-
 #### `examples/adpo_example_config.py`
 - **Python 配置示例**
-- **提供多个预定义配置函数**：
+- **提供预定义配置函数**：
   - `get_adpo_base_config()`
   - `get_adpo_on_policy_config()`
-  - `get_adpo_fixed_anchor_config()`
-  - `get_adpo_ema_config()`
-  - `get_adpo_kl_triggered_config()`
   - `get_adpo_with_good_accuracy_config()`
+  - `get_adpo_memory_optimized_config()`
 
 ## ADPO 核心特性
 
-### 1. 锚点更新模式
+### 1. On-Policy 锚点模式
 
-| 模式 | 描述 | 使用场景 |
-|------|------|----------|
-| **on_policy** | 使用 old_per_token_logps 作为锚点 | 快速收敛，类似 GRPO |
-| **fixed** | 锚点固定为初始策略 | 最大稳定性，真正的离线 ADPO |
-| **ema** | 指数移动平均更新 | 平滑策略演化 |
-| **kl_triggered** | KL 超过阈值时更新 | 自适应平衡探索与利用 |
+当前实现使用 on-policy 模式：
+- 使用 `old_log_prob` 作为锚点
+- 内存高效（无需额外锚点模型）
+- 类似 GRPO 的快速收敛
 
 ### 2. 自适应温度缩放
 
@@ -180,8 +158,6 @@ python -m verl.trainer.main_adpo \
 
 # 3. 运行示例脚本
 bash examples/run_adpo_gsm8k.sh
-bash examples/run_adpo_fixed_anchor.sh
-bash examples/run_adpo_ema.sh
 ```
 
 ### 自定义配置
@@ -202,8 +178,7 @@ ADPO 训练会记录以下特定指标：
 | 指标 | 描述 |
 |------|------|
 | `adpo/anchor_kl` | 当前策略与锚点的 KL 散度 |
-| `adpo/anchor_updates` | 锚点更新次数 |
-| `adpo/mean_tau` | 平均温度值 |
+| `adpo/mean_tau` | 平均温度值 (如果使用自适应温度) |
 | `adpo/loss` | ADPO 损失值 |
 | `adpo/kl_penalty` | KL 惩罚值（如果启用） |
 | `adpo/dropped_prompts` | 丢弃的 prompt 数量（如果启用） |
@@ -218,38 +193,11 @@ algorithm:
   adv_estimator: grpo
   epsilon: 0.2  # PPO clipping
   
-# ADPO 配置  
+# ADPO 配置 (on-policy 模式)
 algorithm:
   adv_estimator: adpo
   tau: 0.8  # 锚点温度
-  anchor_update_mode: on_policy  # 或 fixed/ema/kl_triggered
   use_adaptive_tau: True
-```
-
-### 不同锚点模式
-
-```yaml
-# On-policy（类似 GRPO）
-algorithm:
-  anchor_update_mode: on_policy
-  tau: 0.8
-
-# Fixed（标准 ADPO）
-algorithm:
-  anchor_update_mode: fixed
-  tau: 1.0
-
-# EMA（动态）
-algorithm:
-  anchor_update_mode: ema
-  ema_alpha: 0.99
-  tau: 0.8
-
-# KL-triggered（自适应）
-algorithm:
-  anchor_update_mode: kl_triggered
-  kl_threshold: 0.1
-  tau: 0.8
 ```
 
 ## 依赖要求
@@ -261,8 +209,7 @@ algorithm:
 - omegaconf
 - hydra-core
 
-# good_accuracy 奖励函数额外依赖
-pip install latex2sympy2_extended math_verify
+# good_accuracy 奖励函数使用 VERL 内置的 prime_math，无需额外依赖
 ```
 
 ## 与现有代码的集成
@@ -292,10 +239,7 @@ def adpo_policy_loss(...)
 ### 1. 功能测试
 ```bash
 # 测试 on-policy 模式
-python -m verl.trainer.main_adpo algorithm.anchor_update_mode=on_policy
-
-# 测试 fixed 模式
-python -m verl.trainer.main_adpo algorithm.anchor_update_mode=fixed
+python -m verl.trainer.main_adpo algorithm.adv_estimator=adpo
 
 # 测试 good_accuracy 奖励
 python -m verl.trainer.main_adpo \
@@ -321,39 +265,46 @@ python -m verl.trainer.main_adpo algorithm.tau=2.0
 
 ## 常见问题
 
-### Q1: 如何选择锚点更新模式？
-- **快速实验**：`on_policy`（最快收敛）
-- **最大稳定性**：`fixed`（标准 ADPO）
-- **平滑演化**：`ema`（渐进更新）
-- **自适应**：`kl_triggered`（动态平衡）
-
-### Q2: tau 参数如何设置？
+### Q1: tau 参数如何设置？
 - **低 tau (0.1-0.5)**：更锐利，强调最优样本
 - **中 tau (0.5-1.0)**：平衡，推荐用于大多数任务
 - **高 tau (>1.0)**：更平滑，更多探索
 
-### Q3: 何时使用自适应温度？
+### Q2: 何时使用自适应温度？
 - 任务难度差异大时
 - 希望模型根据样本质量自动调节时
 - 建议默认启用（`use_adaptive_tau: True`）
 
-### Q4: good_accuracy 需要什么依赖？
-```bash
-pip install latex2sympy2_extended math_verify
-```
-
-### Q5: 批大小必须是 num_generations 的倍数吗？
+### Q3: 批大小必须是 num_generations 的倍数吗？
 - 建议是，但不强制
 - ADPO 会自动截断不符合的批次
 - 可能会浪费样本，影响效率
 
+## 内存优化
+
+On-policy 模式的优势：
+1. **无额外模型存储**：使用 old_log_prob 作为锚点
+2. **高效计算**：锚点计算与 PPO 相同
+3. **批处理优化**：使用 torch.no_grad() 包裹非梯度计算
+
+推荐配置以减少内存使用：
+```yaml
+trainer:
+  gradient_checkpointing: true
+  bf16: true
+
+actor_rollout_ref:
+  rollout:
+    free_cache_engine: true  # 混合模式
+    gpu_memory_utilization: 0.65
+```
+
 ## 未来改进方向
 
-1. **锚点策略保存/加载**：支持检查点中保存锚点模型
-2. **多任务 ADPO**：不同任务使用不同的锚点
-3. **Liger Kernel 支持**：实现 `LigerFusedLinearADPOLoss`
-4. **更多奖励函数**：添加更多预定义奖励函数
-5. **自动超参数调优**：基于任务自动调整 tau 和 anchor_update_mode
+1. **多任务 ADPO**：不同任务使用不同的参数
+2. **Liger Kernel 支持**：实现 `LigerFusedLinearADPOLoss`
+3. **更多奖励函数**：添加更多预定义奖励函数
+4. **自动超参数调优**：基于任务自动调整 tau 等参数
 
 ## 贡献者
 

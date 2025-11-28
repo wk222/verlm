@@ -1,5 +1,6 @@
 # ADPO Trainer Configuration
 # Based on ppo_trainer.yaml with ADPO-specific modifications
+# Uses on-policy anchoring for memory efficiency
 
 # Format checks enforced on CI:
 # 1. Comments must appear above each field.
@@ -111,34 +112,11 @@ algorithm:
   num_generations: 8
 
   # ========== ADPO-Specific Configuration ==========
+  # Uses on-policy anchoring (old_log_prob as anchor) for memory efficiency
 
   # Temperature parameter for the anchored softmax distribution.
   # Lower values make the distribution sharper (more peaked).
   tau: 0.8
-
-  # How to update the anchor policy:
-  # - "on_policy": Use old_per_token_logps as anchor (like GRPO) [DEFAULT]
-  # - "fixed": Never update the anchor (standard ADPO)
-  # - "ema": Exponential moving average update every step
-  # - "kl_triggered": Update when KL divergence exceeds threshold
-  anchor_update_mode: on_policy
-
-  # EMA coefficient for anchor updates (only used if anchor_update_mode="ema").
-  # Higher values make the anchor more stable. Formula: anchor = alpha * anchor + (1-alpha) * current
-  ema_alpha: 0.99
-
-  # KL divergence threshold for triggered updates (only used if anchor_update_mode="kl_triggered").
-  # When the running average KL exceeds this threshold, the anchor is updated.
-  kl_threshold: 0.1
-
-  # Whether to center advantages by group mean before computing target distribution.
-  # This helps numerical stability and is recommended for most use cases.
-  use_q_centering: True
-
-  # ADPO-specific KL penalty coefficient for KL(π_current || π_anchor).
-  # This is different from kl_coef (used for ref_model).
-  # Set to 0 for pure ADPO (using only the anchoring mechanism).
-  beta_anchor_kl: 0.0
 
   # Whether to use entropy-based adaptive temperature scaling (Section 3.7 of paper).
   use_adaptive_tau: True
@@ -151,6 +129,10 @@ algorithm:
 
   # Temperature for reward softmax (q computation). q = softmax(R_norm / beta_reward).
   beta_reward: 0.5
+
+  # ADPO-specific KL penalty coefficient for KL(π_current || π_anchor).
+  # Set to 0 for pure ADPO (using only the anchoring mechanism).
+  beta_anchor_kl: 0.0
 
   # Whether to drop prompts where all generations have 0 reward.
   drop_all_failed_prompts: False

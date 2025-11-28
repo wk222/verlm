@@ -17,68 +17,12 @@
 
 """
 Utility functions for ADPO training.
+
+This module provides utility functions for ADPO training in on-policy mode.
 """
 
 from typing import Dict, Any
 import torch
-
-
-def update_anchor_policy_ema(anchor_model, current_model, alpha: float = 0.99):
-    """
-    Update anchor policy using Exponential Moving Average (EMA).
-    
-    Formula: anchor = alpha * anchor + (1-alpha) * current
-    
-    Args:
-        anchor_model: The anchor policy model
-        current_model: The current policy model
-        alpha: EMA coefficient (higher = more stable anchor)
-    """
-    with torch.no_grad():
-        for anchor_param, current_param in zip(
-            anchor_model.parameters(),
-            current_model.parameters()
-        ):
-            anchor_param.data.mul_(alpha).add_((1 - alpha) * current_param.data)
-
-
-def update_anchor_policy_hard_copy(anchor_model, current_model):
-    """
-    Update anchor policy by hard copying current policy weights.
-    
-    Args:
-        anchor_model: The anchor policy model
-        current_model: The current policy model
-    """
-    with torch.no_grad():
-        for anchor_param, current_param in zip(
-            anchor_model.parameters(),
-            current_model.parameters()
-        ):
-            anchor_param.data.copy_(current_param.data)
-
-
-def should_update_anchor_kl_triggered(
-    kl_window: list,
-    kl_threshold: float,
-    window_size: int = 10
-) -> bool:
-    """
-    Check if anchor policy should be updated based on KL threshold.
-    
-    Args:
-        kl_window: List of recent KL divergence values
-        kl_threshold: Threshold for triggering update
-        window_size: Size of the KL window
-        
-    Returns:
-        True if anchor should be updated
-    """
-    if len(kl_window) < window_size:
-        return False
-    
-    mean_kl = sum(kl_window) / len(kl_window)
-    return mean_kl > kl_threshold
 
 
 def compute_adaptive_tau(
@@ -103,18 +47,19 @@ def compute_adaptive_tau(
     Returns:
         Adaptive tau values [num_prompts]
     """
-    # Compute entropy H(q)
-    entropy = -(q_target * torch.log(q_target + 1e-8)).sum(dim=-1)
-    
-    # Maximum entropy for uniform distribution
-    max_entropy = torch.log(torch.tensor(num_generations, dtype=q_target.dtype, device=q_target.device))
-    
-    # Compute adaptive factor
-    adaptive_factor = 1.0 - alpha * (entropy / max_entropy)
-    
-    # Compute tau
-    tau = base_tau * adaptive_factor
-    tau = torch.clamp(tau, min=tau_min)
+    with torch.no_grad():
+        # Compute entropy H(q)
+        entropy = -(q_target * torch.log(q_target + 1e-8)).sum(dim=-1)
+        
+        # Maximum entropy for uniform distribution
+        max_entropy = torch.log(torch.tensor(num_generations, dtype=q_target.dtype, device=q_target.device))
+        
+        # Compute adaptive factor
+        adaptive_factor = 1.0 - alpha * (entropy / max_entropy)
+        
+        # Compute tau
+        tau = base_tau * adaptive_factor
+        tau = torch.clamp(tau, min=tau_min)
     
     return tau
 
@@ -122,23 +67,23 @@ def compute_adaptive_tau(
 def log_adpo_metrics(
     metrics: Dict[str, Any],
     anchor_kl: float,
-    anchor_update_count: int,
     tau: float,
     logger=None
-):
+) -> Dict[str, Any]:
     """
     Log ADPO-specific metrics.
     
     Args:
-        metrics: Metrics dictionary
+        metrics: Metrics dictionary to update
         anchor_kl: KL divergence from anchor
-        anchor_update_count: Number of anchor updates
         tau: Current temperature value
         logger: Optional logger object
+        
+    Returns:
+        Updated metrics dictionary
     """
     adpo_metrics = {
         "adpo/anchor_kl": anchor_kl,
-        "adpo/anchor_update_count": anchor_update_count,
         "adpo/tau": tau,
     }
     
