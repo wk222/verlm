@@ -6,6 +6,8 @@ data:
   max_response_length: 1200
   train_batch_size: 8
   val_batch_size: 8
+  shuffle: true
+  dataloader_num_workers: 0  # Number of workers for dataloader
   return_raw_input_ids: False  # For vLLM rollout
   return_raw_chat: False
 
@@ -33,6 +35,8 @@ actor_rollout_ref:
       grad_offload: False
       optimizer_offload: False
   rollout:
+    name: vllm
+    mode: async
     temperature: 1.0
     top_k: -1 # 0 in some configs, -1 usually means disabled or all
     top_p: 1.0
@@ -61,7 +65,7 @@ algorithm:
   adaptive_tau_alpha: 0.7
   adaptive_tau_min: 0.3
   adaptive_tau_beta: 0.5 # New param we added
-  adaptive_tau_max: 5.0 # New param we added
+  adaptive_tau_max: 1.0 # New param we added
   beta_reward: 0.8
   drop_all_failed_prompts: False
   
@@ -78,6 +82,7 @@ trainer:
   save_freq: -1
   test_freq: 1
   val_before_train: False
+  seed: 42  # Random seed for reproducibility
   default_hdfs_dir: null
   default_local_dir: null
 
