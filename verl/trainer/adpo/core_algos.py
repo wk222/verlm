@@ -51,30 +51,35 @@ def compute_adpo_advantages(
         **kwargs: Additional arguments for compatibility
         
     Returns:
-        advantages: Computed advantages (shape: [batch_size])
-        returns: Returns for value function (same as sequence-level rewards for ADPO)
+        advantages: Computed advantages (shape: [batch_size]) - sequence-level
+        returns: Returns (shape: [batch_size]) - sequence-level
     """
     with torch.no_grad():
         # Convert token-level rewards to sequence-level rewards
-        # Sum over valid tokens - use in-place multiplication for memory efficiency
+        # Sum over valid tokens
         sequence_rewards = (token_level_rewards * response_mask).sum(dim=-1)  # Shape: [batch_size]
         
         num_generations = config.get("num_generations", 8)
         batch_size = sequence_rewards.shape[0]
         
+        # Store original batch size for padding later
+        original_batch_size = batch_size
+        
         # Auto-truncate if not divisible
         if batch_size % num_generations != 0:
             valid_batch_size = (batch_size // num_generations) * num_generations
             if valid_batch_size == 0:
-                returns = sequence_rewards
-                return torch.zeros_like(returns), returns
-            sequence_rewards = sequence_rewards[:valid_batch_size]
+                # Return sequence-level tensors filled with zeros
+                return torch.zeros(original_batch_size, device=sequence_rewards.device, dtype=sequence_rewards.dtype), sequence_rewards
+            sequence_rewards_truncated = sequence_rewards[:valid_batch_size]
             batch_size = valid_batch_size
+        else:
+            sequence_rewards_truncated = sequence_rewards
         
         num_prompts = batch_size // num_generations
-        rewards_reshaped = sequence_rewards.view(num_prompts, num_generations)
+        rewards_reshaped = sequence_rewards_truncated.view(num_prompts, num_generations)
         
-        # Compute group-wise mean and advantages in-place where possible
+        # Compute group-wise mean and advantages
         mean_rewards = rewards_reshaped.mean(dim=1, keepdim=True)
         advantages_reshaped = rewards_reshaped - mean_rewards
         
@@ -83,8 +88,15 @@ def compute_adpo_advantages(
             std_rewards = rewards_reshaped.std(dim=1, keepdim=True)
             advantages_reshaped = advantages_reshaped / (std_rewards + 1e-8)
         
+        # Flatten back to [valid_batch_size]
         advantages = advantages_reshaped.view(-1)
-        returns = sequence_rewards
+        returns = sequence_rewards_truncated
+        
+        # Pad back to original batch size if truncated
+        if batch_size < original_batch_size:
+            pad_size = original_batch_size - batch_size
+            advantages = torch.cat([advantages, torch.zeros(pad_size, device=advantages.device, dtype=advantages.dtype)])
+            returns = torch.cat([returns, sequence_rewards[batch_size:]])
         
     return advantages, returns
 
@@ -113,7 +125,7 @@ def adpo_policy_loss(
     Args:
         old_log_prob: Anchor policy log probabilities (on-policy mode)
         log_prob: Current policy log probabilities (shape: [batch_size, seq_len])
-        advantages: Advantages (shape: [batch_size])
+        advantages: Advantages (shape: [batch_size]) - sequence-level
         response_mask: Mask for valid tokens (shape: [batch_size, seq_len])
         loss_agg_mode: How to aggregate loss (default: "mean")
         config: Algorithm configuration containing ADPO hyperparameters

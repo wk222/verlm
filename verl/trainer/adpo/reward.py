@@ -20,8 +20,14 @@ Reward functions for ADPO training, including good_accuracy reward.
 """
 
 import re
+import warnings
+import logging
 from typing import Optional
 from verl.trainer.ppo.reward import load_reward_manager as load_ppo_reward_manager
+
+# Suppress pylatexenc warnings about LaTeX macros like \frac
+logging.getLogger('pylatexenc').setLevel(logging.ERROR)
+warnings.filterwarnings('ignore', message='.*macro.*failed its substitution.*')
 
 
 def load_reward_manager(config, tokenizer, num_examine=0, **kwargs):
