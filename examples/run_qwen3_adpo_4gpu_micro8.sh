@@ -1,11 +1,11 @@
 #!/bin/bash
 # Reproduce Open-R1 ADPO Baseline - Qwen3-1.7B on WZX MATH Dataset
-# Optimized for 4x4090 (24GB VRAM each)
+# Optimized for 4x4090 (24GB VRAM each) - Micro Batch 8 Version
 
 set -e  # Exit on error
 
 echo "=========================================="
-echo "ADPO Reproduction - Qwen3 on WZX MATH (4x4090)"
+echo "ADPO Reproduction - Qwen3 (Micro Batch 8) on 4x4090"
 echo "=========================================="
 echo ""
 
@@ -22,7 +22,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3  # 4 GPUs
 
 # Configuration
 CONFIG_NAME="adpo_qwen3_math_hybrid" # Use our new hybrid config
-OUTPUT_DIR="data/Qwen3-1.7B-Open-R1-ADPO-WZX"
+OUTPUT_DIR="data/Qwen3-1.7B-Open-R1-ADPO-WZX-Micro8"
 DATA_DIR="data/math_wzx"
 N_GPUS=4
 
@@ -45,30 +45,31 @@ else
 fi
 
 # Run ADPO training
-echo "🚀 Starting ADPO training..."
+echo "🚀 Starting ADPO training (Micro Batch = 8)..."
 echo ""
 
 # Batch Size Calculation for 4x4090 (24GB VRAM each):
 # ============================================================
-# 目标显存占用: 20-22GB (85-90%) - 激进优化版
+# 极限吞吐版 (Micro Batch = 8)
 # ============================================================
 # 配置说明:
 # - train_batch_size=64
-# - ppo_mini_batch_size=24 (调整以适配 micro_batch=6)
-# - ppo_micro_batch_size_per_gpu=6: 4->6 提升训练吞吐
-# - log_prob_micro_batch_size_per_gpu=32: 16->32 加速 log_prob
-# - gpu_memory_utilization=0.65: 0.5->0.65 加速 rollout
+# - ppo_mini_batch_size=32
+# - ppo_micro_batch_size_per_gpu=8: 极限吞吐
+# - log_prob_micro_batch_size_per_gpu=32
+# - gpu_memory_utilization=0.4: 降低 vLLM 占用，给训练腾出显存
 # - rollout.n=8
 #
 # ============================================================
 # Batch Size 约束条件验证:
 # ============================================================
-# 1. normalized_ppo_mini_batch_size = 24 * 8 / 4 = 48
+# 1. normalized_ppo_mini_batch_size = 32 * 8 / 4 = 64
 #
-# 2. 约束: 48 % 6 == 0 ✓ (完美整除)
+# 2. 约束: 64 % 8 == 0 ✓ (完美整除)
 #
-# 3. 显存预估:
-#    micro_batch 4->6, 预计显存从 63% 提升至 ~85%
+# 3. 显存策略:
+#    BF16 节省了 Loss Scaler 显存。
+#    将 vLLM 显存从 0.5 降至 0.4，为 micro_batch=8 腾出 ~2.4GB 空间。
 # ============================================================
 
 python -m verl.trainer.main_adpo \
@@ -82,15 +83,15 @@ python -m verl.trainer.main_adpo \
     data.truncation=right \
     data.shuffle=True \
     actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enable_prefix_caching=True \
     actor_rollout_ref.rollout.max_num_seqs=300 \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=24 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=6 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -98,9 +99,9 @@ python -m verl.trainer.main_adpo \
     trainer.n_gpus_per_node=${N_GPUS} \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.project_name="ADPO-pk-GRPO" \
-    trainer.experiment_name=qwen3-1.7b-adpo-wzx-4gpu \
+    trainer.experiment_name=qwen3-1.7b-adpo-wzx-4gpu-micro8 \
     wandb_config.project="ADPO-pk-GRPO" \
-    wandb_config.name=qwen3-1.7b-adpo-wzx-4gpu \
+    wandb_config.name=qwen3-1.7b-adpo-wzx-4gpu-micro8 \
     "$@"  # Pass any additional arguments
 
 echo ""

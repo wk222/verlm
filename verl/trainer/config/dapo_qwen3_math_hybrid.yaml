@@ -1,6 +1,6 @@
-# ADPO Training Configuration - Qwen3 on WZX MATH Dataset (Hybrid mode - 4 GPU)
-# Based on adpo_trainer.yaml with customizations for 4-GPU setup
-# ADPO does not require a critic model
+# DAPO Training Configuration - Qwen3 on WZX MATH Dataset (Hybrid mode - 4 GPU)
+# DAPO = Dynamic Advantage Preference Optimization
+# 参考: verlm/recipe/dapo/
 
 # Specify default configs from base templates
 defaults:
@@ -13,7 +13,7 @@ defaults:
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
 
-# Critic configuration (disabled for ADPO)
+# Critic configuration (disabled for DAPO)
 critic:
   enable: False
 
@@ -27,10 +27,12 @@ data:
   train_batch_size: 128
   val_batch_size: 64
   truncation: left
-  shuffle: false
+  shuffle: true
   dataloader_num_workers: 0
   return_raw_input_ids: False
   return_raw_chat: False
+  # DAPO uses gen_batch_size = train_batch_size
+  gen_batch_size: ${data.train_batch_size}
 
 # Actor, rollout, and reference model configuration
 actor_rollout_ref:
@@ -49,8 +51,15 @@ actor_rollout_ref:
     ppo_micro_batch_size_per_gpu: 8
     use_dynamic_bsz: False
     use_kl_loss: False
+    # DAPO uses GRPO-style loss with dynamic clipping
     policy_loss:
-      loss_mode: adpo
+      loss_mode: vanilla
+    # Token-mean aggregation
+    loss_agg_mode: token-mean
+    # DAPO uses asymmetric clipping: clip_ratio_low=0, clip_ratio_high=0.28 (per DAPO paper)
+    clip_ratio: 0.2
+    clip_ratio_low: 0.0      # DAPO removes lower clipping (allows advantage to drop freely)
+    clip_ratio_high: 0.28    # DAPO asymmetric upper clip
     optim:
       lr: 1e-6
     fsdp_config:
@@ -79,49 +88,55 @@ actor_rollout_ref:
     free_cache_engine: True
     do_sample: True
 
-# Algorithm configuration for ADPO
+# Algorithm configuration for DAPO
 algorithm:
-  adv_estimator: adpo
+  # DAPO uses GRPO advantage estimator
+  adv_estimator: grpo
   
-  # Required by base trainer (not used by ADPO, but needed for compatibility)
+  # Required by base trainer
   gamma: 1.0
   lam: 1.0
   
-  # ADPO does not use KL penalty (on-policy mode)
+  # DAPO does not use KL penalty
   use_kl_in_reward: False
   kl_ctrl:
     type: fixed
     kl_coef: 0.0
   
-  # ADPO Hyperparameters
-  tau: 1.0
-  use_adaptive_tau: True
-  adaptive_tau_alpha: 0.7
-  adaptive_tau_min: 0.3
-  adaptive_tau_beta: 0.5
-  adaptive_tau_max: 1.0
-  beta_reward: 0.8
-  drop_all_failed_prompts: False
-  
-  # Advantage Estimation Configuration
-  scale_rewards: False        # Whether to normalize advantages by std
-  use_kde_advantage: False    # Whether to use KDE-based advantage estimation
-  kde_bandwidth_factor: 1.0   # Bandwidth multiplier for KDE
-  use_q_centering: True       # Whether to center logits using Q-target (Numerical Stability)
+  # DAPO: 不使用标准差归一化 (Dr.GRPO style)
+  norm_adv_by_std_in_grpo: False
   
   # Gradient Accumulation
-  global_batch_size: 32 # Tuned for 4x4090 setup
+  global_batch_size: 32
+
+# DAPO-specific reward_model configuration
+reward_model:
+  enable: False
+  reward_manager: dapo
+  # DAPO overlong buffer (optional - for penalizing overly long responses)
+  overlong_buffer:
+    enable: False
+    len: 0
+    penalty_factor: 0.0
+    log: False
+
+# DAPO filter_groups (optional - for filtering low-quality groups)
+# algorithm:
+#   filter_groups:
+#     enable: False
+#     metric: null
+#     max_num_gen_batches: 0
 
 # Trainer configuration
 trainer:
   total_epochs: 2
-  project_name: open-r1-ADPO
-  experiment_name: qwen3-1.7b-adpo-baseline
+  project_name: ADPO-pk-GRPO
+  experiment_name: qwen3-1.7b-dapo-baseline
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
-  save_freq: -1  # keep -1 (disabled) because we will use save_each_epoch for epoch-level checkpoint
-  save_each_epoch: true  # custom flag: save checkpoint at end of each epoch
+  save_freq: -1
+  save_each_epoch: true
   test_freq: -1
   val_before_train: False
   seed: 42
@@ -145,14 +160,14 @@ trainer:
   use_legacy_worker_impl: auto
   bf16: True
   fp16: False
-  push_to_hub: true  # enable upload to HuggingFace Hub
-  hub_model_id: wzx111/Qwen3-1.7B-ADPO-math  # change to your HF repo (must exist or will be created)
-  hub_private: true  # create private repo if not exists
-  hub_final_upload: true  # push final checkpoint (latest global_step)
-  hub_push_each_epoch: true  # push checkpoint at end of each epoch
-  hub_commit_message: "VERL ADPO checkpoint"
+  push_to_hub: true
+  hub_model_id: wzx111/Qwen3-1.7B-DAPO-math
+  hub_private: true
+  hub_final_upload: true
+  hub_push_each_epoch: true
+  hub_commit_message: "VERL DAPO checkpoint"
 
-# Custom reward function (good_accuracy from ADPO)
+# Custom reward function (same as ADPO for fair comparison)
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy
@@ -165,22 +180,18 @@ custom_reward_function:
     repetition_threshold: 0.3
     repetition_threshold_penalty: -0.5
 
-# Reward model configuration
-# ADPO uses custom_reward_function (good_accuracy), no external RM needed
-reward_model:
-  enable: False
-
 # WandB logging configuration
 wandb_config:
-  project: open-r1-ADPO
+  project: ADPO-pk-GRPO
   entity: null
-  name: qwen3-1.7b-adpo-baseline
-  group: qwen3_adpo
+  name: qwen3-1.7b-dapo-baseline
+  group: qwen3_dapo
   tags:
-    - adpo
+    - dapo
+    - grpo
+    - asymmetric-clip
     - qwen3
     - math
-    - reasoning
 
 # Ray distributed computing configuration
 ray_kwargs:

@@ -839,6 +839,125 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    def _push_to_hub(self, commit_message: str = None, is_final: bool = False):
+        """Upload actor checkpoint (+ tokenizer) to HuggingFace Hub.
+
+        Expected config fields under trainer:
+          push_to_hub: bool
+          hub_model_id: str (e.g. "yourname/Qwen3-1.7B-ADPO-math")
+          hub_private: bool
+          hub_commit_message: str
+          hub_push_each_epoch: bool (default False)
+        Token is read from env var HUGGINGFACE_HUB_TOKEN (recommended) or cached login.
+        """
+        if not self.config.trainer.get("push_to_hub", False):
+            return
+        repo_id = self.config.trainer.get("hub_model_id", None)
+        if not isinstance(repo_id, str) or repo_id.strip() == "":
+            print("[Hub] hub_model_id 未设置，跳过上传。")
+            return
+        try:
+            from huggingface_hub import HfApi
+        except Exception as e:
+            print(f"[Hub] 导入 huggingface_hub 失败: {e}. 请先安装 huggingface_hub。")
+            return
+        api = HfApi()
+        token = os.environ.get("HUGGINGFACE_HUB_TOKEN", None)
+        private = bool(self.config.trainer.get("hub_private", True))
+        if commit_message is None:
+            commit_message = self.config.trainer.get("hub_commit_message", "VERL checkpoint")
+        # Ensure repo exists
+        try:
+            api.create_repo(repo_id=repo_id, private=private, exist_ok=True, token=token)
+        except Exception as e:
+            print(f"[Hub] 创建/确认仓库失败: {e}")
+        ckpt_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
+        actor_folder = os.path.join(ckpt_folder, "actor")
+        if not os.path.isdir(actor_folder):
+            print(f"[Hub] 未找到 actor 目录: {actor_folder}, 跳过上传。")
+            return
+        # Copy tokenizer files into actor folder if not present
+        self._copy_tokenizer_to_folder(actor_folder)
+        # Write model card
+        try:
+            self._write_model_card(actor_folder)
+        except Exception as e:
+            print(f"[Hub] 写入模型卡失败: {e}")
+        print(f"[Hub] 上传目录 {actor_folder} 到仓库 {repo_id} (step={self.global_steps}, final={is_final})")
+        try:
+            api.upload_folder(
+                folder_path=actor_folder,
+                path_in_repo="",
+                repo_id=repo_id,
+                token=token,
+                commit_message=commit_message,
+            )
+            print("[Hub] 上传完成。")
+        except Exception as e:
+            print(f"[Hub] 上传失败: {e}")
+
+    def _push_final_to_hub(self):
+        """Backward compatible wrapper for final push."""
+        self._push_to_hub(is_final=True)
+
+    def _copy_tokenizer_to_folder(self, target_folder: str):
+        """Copy tokenizer files from base model to target folder for HF upload."""
+        import shutil
+        model_path = self.config.actor_rollout_ref.model.path
+        # Try to resolve local path or huggingface cache
+        from transformers import AutoTokenizer
+        try:
+            tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            tok.save_pretrained(target_folder)
+            print(f"[Hub] Tokenizer 已保存至 {target_folder}")
+        except Exception as e:
+            print(f"[Hub] 保存 tokenizer 失败: {e}")
+
+    def _write_model_card(self, actor_folder: str):
+        readme_path = os.path.join(actor_folder, "README.md")
+        conf = self.config
+        model_path = conf.actor_rollout_ref.model.path
+        total_epochs = conf.trainer.total_epochs
+        task_name = conf.trainer.experiment_name
+        dtype = conf.actor_rollout_ref.actor.fsdp_config.dtype
+        adv_estimator = conf.algorithm.adv_estimator
+        use_q_centering = getattr(conf.algorithm, "use_q_centering", True)
+        use_kde_advantage = getattr(conf.algorithm, "use_kde_advantage", False)
+        scale_rewards = getattr(conf.algorithm, "scale_rewards", False)
+        rollout_n = conf.actor_rollout_ref.rollout.n
+        max_num_seqs = conf.actor_rollout_ref.rollout.max_num_seqs
+        gpu_mem_util = conf.actor_rollout_ref.rollout.gpu_memory_utilization
+        micro_bsz = conf.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu", None)
+        mini_bsz = conf.actor_rollout_ref.actor.get("ppo_mini_batch_size", None)
+        tau_beta = getattr(conf.algorithm, "adaptive_tau_beta", None)
+        repo_id = conf.trainer.get('hub_model_id','<your/repo>')
+        metrics_hint = f"Global step: {self.global_steps}"
+        md = (
+            f"# VERL ADPO: {task_name}\n\n"
+            f"本模型由 VERL (Ray PPO/ADPO) 训练生成，并在训练结束自动上传。\n\n"
+            f"- 基础模型: `{model_path}`\n"
+            f"- 训练框架: VERL (Ray + FSDP + vLLM)\n"
+            f"- 任务: `{task_name}`\n"
+            f"- 总 Epoch: `{total_epochs}`\n"
+            f"- 精度: `{dtype}`\n"
+            f"- 优势估计: `{adv_estimator}` (use_q_centering={use_q_centering}, use_kde_advantage={use_kde_advantage}, scale_rewards={scale_rewards})\n"
+            f"- 采样并发: rollout.n=`{rollout_n}`, max_num_seqs=`{max_num_seqs}`, gpu_memory_utilization=`{gpu_mem_util}`\n"
+            f"- 训练批量: ppo_mini_batch_size=`{mini_bsz}`, ppo_micro_batch_size_per_gpu=`{micro_bsz}`\n"
+            f"- 自适应温度: adaptive_tau_beta=`{tau_beta}`\n\n"
+            f"## 快速使用\n"
+            f"```python\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\n"
+            f"model = AutoModelForCausalLM.from_pretrained(\"{repo_id}\")\n"
+            f"tokenizer = AutoTokenizer.from_pretrained(\"{repo_id}\")\n"
+            f"print(model.config)\n```\n\n"
+            f"## 训练摘要\n"
+            f"- {metrics_hint}\n"
+            f"- 检查点目录: `global_step_{self.global_steps}/actor/`\n\n"
+            f"## 许可与责任\n"
+            f"请遵循上游基础模型与数据集的许可条款。本模型卡由 VERL 自动生成。\n"
+        )
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(md)
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             # NOTE: while there is no checkpoint to load, we still need to offload the model and optimizer to CPU
@@ -1314,9 +1433,27 @@ class RayPPOTrainer:
                     )
 
                 if is_last_step:
+                    # Ensure final checkpoint saved even if save_freq disabled.
+                    if self.config.trainer.get("hub_final_upload", True) or self.config.trainer.get("save_each_epoch", False):
+                        with marked_timer("final_save_checkpoint", timing_raw, color="green"):
+                            self._save_checkpoint()
+                    # Optional final push to hub.
+                    if self.config.trainer.get("hub_final_upload", True):
+                        with marked_timer("push_to_hub", timing_raw, color="green"):
+                            self._push_final_to_hub()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
+
+            # end of epoch hook (executed only if not broken by return)
+            if self.config.trainer.get("save_each_epoch", False):
+                # Save checkpoint at end of epoch (global_steps already at start of next epoch incremented earlier inside loop).
+                # We save using last completed global_steps (current value after loop end).
+                print(f"[Epoch {epoch}] save_each_epoch 开启，保存 checkpoint。")
+                self._save_checkpoint()
+                # Optional: push each epoch checkpoint to hub
+                if self.config.trainer.get("hub_push_each_epoch", False):
+                    self._push_to_hub(commit_message=f"Epoch {epoch} checkpoint (step {self.global_steps})")
 
                 # this is experimental and may be changed/removed in the future
                 # in favor of a general-purpose data buffer pool

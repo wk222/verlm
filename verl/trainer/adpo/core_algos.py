@@ -79,14 +79,54 @@ def compute_adpo_advantages(
         num_prompts = batch_size // num_generations
         rewards_reshaped = sequence_rewards_truncated.view(num_prompts, num_generations)
         
-        # Compute group-wise mean and advantages
-        mean_rewards = rewards_reshaped.mean(dim=1, keepdim=True)
-        advantages_reshaped = rewards_reshaped - mean_rewards
-        
-        # Optional: Scale by std if configured
-        if config.get("scale_rewards", "group") == "group":
+        # Compute advantages based on configuration
+        if config.get("use_kde_advantage", False):
+            # KDE-based Advantage Estimation
+            # Idea: Map rewards to their percentile in the estimated distribution (CDF),
+            # then transform to logits: Adv = logit(CDF(r))
+            
+            # 1. Compute Bandwidth (h) using Scott's Rule
+            # h = factor * 1.06 * std * N^(-1/5)
             std_rewards = rewards_reshaped.std(dim=1, keepdim=True)
-            advantages_reshaped = advantages_reshaped / (std_rewards + 1e-8)
+            # Handle zero std (all rewards equal)
+            std_rewards = torch.where(std_rewards < 1e-6, torch.ones_like(std_rewards), std_rewards)
+            
+            bandwidth_factor = config.get("kde_bandwidth_factor", 1.0)
+            h = bandwidth_factor * 1.06 * std_rewards * (num_generations ** (-0.2))
+            
+            # 2. Compute Pairwise Differences for KDE
+            # r_j: [B, N, 1], r_k: [B, 1, N]
+            r_j = rewards_reshaped.unsqueeze(2)
+            r_k = rewards_reshaped.unsqueeze(1)
+            
+            # u = (r_j - r_k) / h
+            u = (r_j - r_k) / (h.unsqueeze(2) + 1e-8)
+            
+            # 3. Compute CDF using Gaussian Kernel
+            # CDF(x) = 1/N * sum(Phi(u))
+            # Phi(x) = 0.5 * (1 + erf(x / sqrt(2)))
+            cdf_contributions = 0.5 * (1 + torch.erf(u / 1.41421356))
+            cdf = cdf_contributions.mean(dim=2) # [B, N]
+            
+            # 4. Logit Transformation
+            # Clip to avoid infinity: [eps, 1-eps]
+            epsilon = 1e-4
+            cdf = cdf.clamp(epsilon, 1 - epsilon)
+            advantages_reshaped = torch.log(cdf / (1 - cdf))
+            
+        elif config.get("scale_rewards", False):
+            # Standard Normalized Advantage
+            mean_rewards = rewards_reshaped.mean(dim=1, keepdim=True)
+            std_rewards = rewards_reshaped.std(dim=1, keepdim=True)
+            advantages_reshaped = (rewards_reshaped - mean_rewards) / (std_rewards + 1e-8)
+            
+        else:
+            # Default: Centered Advantage (Reward - Mean)
+            mean_rewards = rewards_reshaped.mean(dim=1, keepdim=True)
+            advantages_reshaped = rewards_reshaped - mean_rewards
+        
+        # Flatten back to [valid_batch_size]
+        advantages = advantages_reshaped.view(-1)
         
         # Flatten back to [valid_batch_size]
         advantages = advantages_reshaped.view(-1)
@@ -174,41 +214,51 @@ def adpo_policy_loss(
     sequence_logps_reshaped = sequence_logps.view(num_prompts, num_generations)
     anchor_sequence_logps_reshaped = anchor_sequence_logps.view(num_prompts, num_generations)
     
-    # Compute q_target: normalized softmax of advantages
-    # Normalize: (R - mean) / (std + eps)
-    mean_adv = advantages_reshaped.mean(dim=1, keepdim=True)
-    std_adv = advantages_reshaped.std(dim=1, keepdim=True)
-    advantages_norm = (advantages_reshaped - mean_adv) / (std_adv + 1e-8)
-    
-    # q = softmax(R_norm / beta_reward)
-    q_target = F.softmax(advantages_norm / beta_reward, dim=-1)
+    # Compute q_target: softmax of advantages
+    if config.get("scale_rewards", False):
+        # Normalize: (R - mean) / (std + eps)
+        mean_adv = advantages_reshaped.mean(dim=1, keepdim=True)
+        std_adv = advantages_reshaped.std(dim=1, keepdim=True)
+        advantages_norm = (advantages_reshaped - mean_adv) / (std_adv + 1e-8)
+        q_target = F.softmax(advantages_norm / beta_reward, dim=-1)
+    else:
+        # Use raw advantages (already centered)
+        q_target = F.softmax(advantages_reshaped / beta_reward, dim=-1)
     
     # Compute adaptive temperature if enabled
     # Note: tau is treated as a hyperparameter, not a learned parameter,
     # so we compute it without gradients. Gradients flow through log_prob.
     if use_adaptive_tau:
         with torch.no_grad():
-            # ========================================
-            # Smooth Hybrid Adaptive Temperature Scaling
-            # ========================================
-            # Formula: τ = τ_base × (1 + α·H_norm + β·(1-H_norm)·(1-R_norm))
+            # ============================================================
+            # Smart Hybrid Adaptive Strategy
+            # ============================================================
             
-            # 1. Estimate Model Entropy (H) using -log_prob of sampled tokens
-            # H ≈ -1/T * sum(log p(x_t))
-            # This is a proxy for model uncertainty (on-policy approximation)
-            token_entropy = -log_prob * response_mask
-            mean_token_entropy = token_entropy.sum(dim=-1) / response_mask.sum(dim=-1).clamp(min=1.0) # [B]
+            # 1. Get Static Entropy (from Sampling Policy / old_log_prob)
+            # Physical meaning: "Native Signal-to-Noise Ratio". If generation was messy, the problem is hard.
+            # Role: Determines the base Uncertainty Factor (alpha term).
+            token_entropy_static = -old_log_prob * response_mask
+            mean_static = token_entropy_static.sum(dim=-1) / response_mask.sum(dim=-1).clamp(min=1.0)
             
-            # Reshape to groups
-            mean_token_entropy_grouped = mean_token_entropy.view(num_prompts, num_generations).mean(dim=1) # [B_prompts]
-            
-            # Normalize Entropy (H_norm)
-            # H_norm = H / log(vocab_size)
+            # 2. Get Dynamic Entropy (from Current Policy / log_prob, detached)
+            # Physical meaning: Model's "current" attitude towards this problem.
+            # Role: Real-time monitoring for "blind confidence" (beta term).
+            token_entropy_dynamic = -log_prob.detach() * response_mask
+            mean_dynamic = token_entropy_dynamic.sum(dim=-1) / response_mask.sum(dim=-1).clamp(min=1.0)
+
+            # Normalization
             vocab_size = config.get("vocab_size", 32000)
-            max_token_entropy = torch.log(torch.tensor(vocab_size, dtype=mean_token_entropy.dtype, device=mean_token_entropy.device))
-            normalized_entropy = (mean_token_entropy_grouped / max_token_entropy).clamp(0, 1) # [B_prompts]
+            vocab_log = torch.log(torch.tensor(vocab_size, dtype=log_prob.dtype, device=log_prob.device))
             
-            # 2. Normalize Rewards (R_norm)
+            # Aggregate to Prompt Level (Group Mean)
+            H_static = mean_static.view(num_prompts, num_generations).mean(dim=1) / vocab_log
+            H_dynamic = mean_dynamic.view(num_prompts, num_generations).mean(dim=1) / vocab_log
+            
+            # Clamp entropies
+            H_static = H_static.clamp(0, 1)
+            H_dynamic = H_dynamic.clamp(0, 1)
+            
+            # 3. Prepare Rewards (R_norm)
             if "rewards" in kwargs:
                 rewards = kwargs["rewards"]
                 # Ensure rewards match batch size (in case of truncation)
@@ -226,28 +276,34 @@ def adpo_policy_loss(
                     normalized_reward = torch.full_like(mean_rewards, 0.5)
                 normalized_reward = normalized_reward.clamp(0, 1)
             else:
-                # Fallback if rewards not available (should not happen in standard loop)
-                normalized_reward = torch.full_like(normalized_entropy, 0.5)
+                # Fallback if rewards not available
+                normalized_reward = torch.full_like(H_static, 0.5)
             
-            # 3. Compute Terms
-            # confidence = 1 - H_norm (high when model is certain)
-            # error = 1 - R_norm (high when rewards are low)
-            confidence = (1.0 - normalized_entropy).clamp(min=0)
-            error = (1.0 - normalized_reward).clamp(min=0)
+            # ============================================================
+            # 4. Smart Combination Formula
+            # ============================================================
             
-            # Uncertainty term: protects against high entropy (confused model)
-            uncertainty_term = adaptive_tau_alpha * normalized_entropy
+            # [A. Base Protection] Use Static Entropy
+            # Logic: If data itself is low quality (high H_static), increase Tau globally to avoid overfitting noise.
+            # Why not dynamic? Because H_dynamic decreases with training, we don't want to relax constraints just because model memorized noise.
+            uncertainty_term = adaptive_tau_alpha * H_static
             
-            # Penalty term: punishes confident but wrong predictions (arrogant idiot)
-            adaptive_tau_beta = config.get("adaptive_tau_beta", 0.5)
-            penalty_term = adaptive_tau_beta * confidence * error
+            # [B. Emergency Brake] Use Dynamic Entropy
+            # Logic: If model becomes extremely confident "now" (low H_dynamic) but is wrong (high Error), punish immediately.
+            # Why not static? Because old model might have been humble, failing to detect current collapse.
+            current_confidence = (1.0 - H_dynamic).clamp(min=0)
+            current_error = (1.0 - normalized_reward).clamp(min=0)
             
-            # 4. Final Adaptive Tau
-            adaptive_tau_max = config.get("adaptive_tau_max", 5.0)
+            # Default beta to 5.0 if not specified, as this is a strong penalty
+            adaptive_tau_beta = config.get("adaptive_tau_beta", 5.0)
+            penalty_term = adaptive_tau_beta * current_confidence * current_error
+            
+            # 5. Compute Final Tau
+            adaptive_tau_max = config.get("adaptive_tau_max", 10.0)
             current_tau = tau * (1.0 + uncertainty_term + penalty_term)
             current_tau = torch.clamp(current_tau, min=adaptive_tau_min, max=adaptive_tau_max)
             
-            # Broadcast to [B_prompts, 1] to match sequence_logps_reshaped [B_prompts, num_generations]
+            # Broadcast to [B_prompts, 1]
             current_tau = current_tau.unsqueeze(-1)
     else:
         current_tau = tau
@@ -255,6 +311,14 @@ def adpo_policy_loss(
     # Compute anchored scores: (s - s_anchor) / tau
     anchored_scores = (sequence_logps_reshaped - anchor_sequence_logps_reshaped) / current_tau
     
+    # Q-Centering (Numerical Stability Optimization)
+    # u_bar = u - (q * u).sum()
+    # This keeps logits centered and prevents drift, improving FP16 stability
+    if config.get("use_q_centering", True):
+        # q_target should be detached to act as a fixed weight
+        centering_term = (q_target.detach() * anchored_scores).sum(dim=-1, keepdim=True)
+        anchored_scores = anchored_scores - centering_term
+
     # ADPO listwise loss: cross-entropy
     log_p_anchored = F.log_softmax(anchored_scores, dim=-1)
     per_prompt_loss = -(q_target * log_p_anchored).sum(dim=-1)
@@ -292,10 +356,16 @@ def adpo_policy_loss(
         metrics = {
             "adpo/anchor_kl": kl_val,
             "adpo/loss": per_prompt_loss.mean().item(),
+            "adpo/advantage_mean": advantages.mean().item(),
+            "adpo/advantage_std": advantages.std().item(),
+            "adpo/advantage_max": advantages.max().item(),
+            "adpo/advantage_min": advantages.min().item(),
+            "adpo/q_target_entropy": (-(q_target * torch.log(q_target + 1e-8)).sum(dim=-1)).mean().item(),
         }
         if use_adaptive_tau:
             metrics["adpo/mean_tau"] = current_tau.mean().item() if isinstance(current_tau, torch.Tensor) else current_tau
-            metrics["adpo/entropy_norm_mean"] = normalized_entropy.mean().item()
+            metrics["adpo/entropy_static_mean"] = H_static.mean().item()
+            metrics["adpo/entropy_dynamic_mean"] = H_dynamic.mean().item()
             metrics["adpo/reward_norm_mean"] = normalized_reward.mean().item()
             metrics["adpo/penalty_term_mean"] = penalty_term.mean().item()
         if kl_loss is not None:

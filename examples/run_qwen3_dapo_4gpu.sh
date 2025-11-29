@@ -1,16 +1,18 @@
 #!/bin/bash
-# Reproduce Open-R1 ADPO Baseline - Qwen3-1.7B on WZX MATH Dataset
+# DAPO Training - Qwen3-1.7B on WZX MATH Dataset
+# DAPO = Dynamic Advantage Preference Optimization
+# 特点: 非对称裁剪 (clip_ratio_low=0, clip_ratio_high=0.28)
 # Optimized for 4x4090 (24GB VRAM each)
 
-set -e  # Exit on error
+set -e
 
 echo "=========================================="
-echo "ADPO Reproduction - Qwen3 on WZX MATH (4x4090)"
+echo "DAPO Training - Qwen3 on 4x4090"
 echo "=========================================="
 echo ""
 
 # Check if we're in the verlm directory
-if [ ! -d "verl/trainer/adpo" ]; then
+if [ ! -d "verl/trainer" ]; then
     echo "❌ Error: Please run this script from the verlm/ directory."
     echo "   Current directory: $(pwd)"
     exit 1
@@ -18,11 +20,11 @@ fi
 
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-export CUDA_VISIBLE_DEVICES=0,1,2,3  # 4 GPUs
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # Configuration
-CONFIG_NAME="adpo_qwen3_math_hybrid" # Use our new hybrid config
-OUTPUT_DIR="data/Qwen3-1.7B-Open-R1-ADPO-WZX"
+CONFIG_NAME="dapo_qwen3_math_hybrid"
+OUTPUT_DIR="data/Qwen3-1.7B-DAPO-WZX"
 DATA_DIR="data/math_wzx"
 N_GPUS=4
 
@@ -31,6 +33,7 @@ echo "  - Config: ${CONFIG_NAME}"
 echo "  - Output: ${OUTPUT_DIR}"
 echo "  - Data: ${DATA_DIR}"
 echo "  - GPUs: ${CUDA_VISIBLE_DEVICES} (${N_GPUS} GPUs)"
+echo "  - Algorithm: DAPO (Asymmetric Clipping GRPO)"
 echo ""
 
 # Download and preprocess WZX MATH dataset if not exists
@@ -44,34 +47,21 @@ else
     echo ""
 fi
 
-# Run ADPO training
-echo "🚀 Starting ADPO training..."
+echo "🚀 Starting DAPO training..."
 echo ""
 
-# Batch Size Calculation for 4x4090 (24GB VRAM each):
 # ============================================================
-# 目标显存占用: 20-22GB (85-90%) - 激进优化版
+# DAPO 配置说明:
 # ============================================================
-# 配置说明:
-# - train_batch_size=64
-# - ppo_mini_batch_size=24 (调整以适配 micro_batch=6)
-# - ppo_micro_batch_size_per_gpu=6: 4->6 提升训练吞吐
-# - log_prob_micro_batch_size_per_gpu=32: 16->32 加速 log_prob
-# - gpu_memory_utilization=0.65: 0.5->0.65 加速 rollout
-# - rollout.n=8
-#
-# ============================================================
-# Batch Size 约束条件验证:
-# ============================================================
-# 1. normalized_ppo_mini_batch_size = 24 * 8 / 4 = 48
-#
-# 2. 约束: 48 % 6 == 0 ✓ (完美整除)
-#
-# 3. 显存预估:
-#    micro_batch 4->6, 预计显存从 63% 提升至 ~85%
+# - adv_estimator: grpo (使用GRPO的advantage估计)
+# - policy_loss.loss_mode: vanilla (标准PPO损失)
+# - clip_ratio_low: 0.0 (DAPO核心: 移除下界裁剪)
+# - clip_ratio_high: 0.28 (非对称上界裁剪)
+# - norm_adv_by_std_in_grpo: False (不使用标准差归一化，Dr.GRPO风格)
+# - 其他配置与ADPO保持一致以保证公平对比
 # ============================================================
 
-python -m verl.trainer.main_adpo \
+python -m verl.trainer.main_ppo \
     --config-name ${CONFIG_NAME} \
     data.train_files=${DATA_DIR}/train.parquet \
     data.val_files=${DATA_DIR}/train.parquet \
@@ -95,15 +85,18 @@ python -m verl.trainer.main_adpo \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.clip_ratio_low=0.0 \
+    actor_rollout_ref.actor.clip_ratio_high=0.28 \
+    algorithm.norm_adv_by_std_in_grpo=False \
     trainer.n_gpus_per_node=${N_GPUS} \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.project_name="ADPO-pk-GRPO" \
-    trainer.experiment_name=qwen3-1.7b-adpo-wzx-4gpu \
+    trainer.experiment_name=qwen3-1.7b-dapo-wzx-4gpu \
     wandb_config.project="ADPO-pk-GRPO" \
-    wandb_config.name=qwen3-1.7b-adpo-wzx-4gpu \
-    "$@"  # Pass any additional arguments
+    wandb_config.name=qwen3-1.7b-dapo-wzx-4gpu \
+    "$@"
 
 echo ""
 echo "=========================================="
-echo "✅ ADPO Training Complete!"
+echo "✅ DAPO Training Complete!"
 echo "=========================================="
