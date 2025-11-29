@@ -22,14 +22,15 @@ data:
   train_files: $DATA_DIR/train.parquet
   val_files: $DATA_DIR/train.parquet
   prompt_key: prompt
-  max_prompt_length: 512  # Reduced for faster processing
-  max_response_length: 1024  # Reduced for faster processing
-  train_batch_size: 64  # Increased from 32
-  val_batch_size: 64  # Increased from 32
-  shuffle: false  # Set to false for reproducibility
-  dataloader_num_workers: 0  # Number of workers for dataloader
-  return_raw_input_ids: False  # For vLLM rollout
-  return_raw_chat: False  # Required for agent loop (raw_prompt)
+  max_prompt_length: 1024
+  max_response_length: 1280
+  train_batch_size: 128
+  val_batch_size: 64
+  truncation: left
+  shuffle: false
+  dataloader_num_workers: 0
+  return_raw_input_ids: False
+  return_raw_chat: False
 
 # Actor, rollout, and reference model configuration
 actor_rollout_ref:
@@ -41,34 +42,37 @@ actor_rollout_ref:
     enable_gradient_checkpointing: True
     use_remove_padding: True
   actor:
-    strategy: fsdp  # FSDP (Fully Sharded Data Parallel)
-    ppo_mini_batch_size: 128  # Increased from 32
+    strategy: fsdp
+    ppo_mini_batch_size: 64
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 8  # Increased from 4
+    ppo_micro_batch_size_per_gpu: 8
+    use_dynamic_bsz: False
     use_kl_loss: False
     policy_loss:
-      loss_mode: adpo  # Use ADPO policy loss function
+      loss_mode: adpo
     optim:
-      lr: 1.5e-5
+      lr: 1e-6
     fsdp_config:
       wrap_policy:
-        # Transformer layer wrapper
         min_num_params: 0
-      param_offload: False  # Disable offload for speed (we have enough VRAM)
+      param_offload: False
       optimizer_offload: False
   rollout:
     name: vllm
-    mode: sync  # Use sync mode (simpler, no agent loop required)
+    mode: sync
     temperature: 1.0
-    top_k: -1 # 0 in some configs, -1 usually means disabled or all
+    top_k: -1
     top_p: 1.0
-    n: 8 # num_generations
-    gpu_memory_utilization: 0.6  # Increased from 0.4 to use more VRAM
+    n: 8
+    gpu_memory_utilization: 0.55
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 16  # Increased from 4
+    log_prob_micro_batch_size_per_gpu: 16
+    max_num_seqs: 192
     ignore_eos: False
     enforce_eager: False
+    enable_chunked_prefill: True
+    enable_prefix_caching: True
     free_cache_engine: True
     do_sample: True
 

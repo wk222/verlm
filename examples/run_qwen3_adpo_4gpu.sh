@@ -50,35 +50,35 @@ echo ""
 
 # Batch Size Calculation for 4x4090 (24GB VRAM each):
 # ============================================================
-# 约束: train_batch_size >= ppo_mini_batch_size
+# 目标显存占用: 18-20GB (75-80%)
 # ============================================================
-# - train_batch_size: 每个训练步骤的提示数量
-# - ppo_mini_batch_size: PPO 更新的 mini-batch 大小 (必须 <= train_batch_size)
-# - ppo_micro_batch_size_per_gpu: 每 GPU 的微批次大小 (用于梯度累积)
-# - rollout.n: 每个提示生成的响应数量
-#
 # 配置说明:
-# - train_batch_size=256: 每步使用 256 个提示 (增大以提升吞吐)
-# - ppo_mini_batch_size=128: PPO 每次更新用 128 个样本
-# - ppo_micro_batch_size_per_gpu=8: 每 GPU 处理 8 个样本 (梯度累积 = 128/(4*8)=4)
-# - rollout.n=4: 每提示生成 4 个响应 (总序列数 = 256*4=1024)
-# - max_prompt_length=1024: 支持长 prompt (有些数据 800+ tokens)
-# - max_response_length=1280: 支持 1200+ 的 response
-# - truncation=left: 超长 prompt 从左边截断 (保留最近内容)
-# - gpu_memory_utilization=0.7: 提升 GPU 显存利用率
+# - train_batch_size=128, ppo_mini_batch_size=64
+# - ppo_micro_batch_size_per_gpu=6: 每 GPU 6 个样本
+# - log_prob_micro_batch_size_per_gpu=12: log prob 批次
+# - gpu_memory_utilization=0.55: rollout 显存占用
+# - rollout.n=8: 每提示生成 8 个响应
 
 python -m verl.trainer.main_adpo \
     --config-name ${CONFIG_NAME} \
     data.train_files=${DATA_DIR}/train.parquet \
-    data.train_batch_size=256 \
+    data.val_files=${DATA_DIR}/train.parquet \
+    data.train_batch_size=128 \
+    data.val_batch_size=64 \
     data.max_prompt_length=1024 \
     data.max_response_length=1280 \
     data.truncation=left \
-    actor_rollout_ref.rollout.n=4 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.55 \
+    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.enable_chunked_prefill=True \
+    actor_rollout_ref.rollout.enable_prefix_caching=True \
+    actor_rollout_ref.rollout.max_num_seqs=192 \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     trainer.n_gpus_per_node=${N_GPUS} \

@@ -51,18 +51,59 @@ def load_reward_manager(config, tokenizer, num_examine=0, **kwargs):
 
 
 def extract_boxed_answer(text: str) -> str:
-    """从文本中提取 \\boxed{} 或 <answer> 标签中的答案。"""
-    # 尝试提取 \\boxed{}
-    boxed_pattern = r'\\boxed\{([^}]+)\}'
-    boxed_match = re.search(boxed_pattern, text)
-    if boxed_match:
-        return boxed_match.group(1).strip()
+    """从文本中提取 \\boxed{} 或 <answer> 标签中的答案。更鲁棒地处理嵌套括号。"""
+    if not text:
+        return ""
+    
+    # 方法1: 使用括号匹配找到最后一个 \boxed{} (处理嵌套)
+    def find_last_boxed(s: str) -> str:
+        idx = s.rfind("\\boxed")
+        if idx < 0:
+            idx = s.rfind("\\fbox")
+            if idx < 0:
+                return None
+        
+        i = idx
+        left_brace_idx = None
+        right_brace_idx = None
+        num_left_braces_open = 0
+        
+        while i < len(s):
+            if s[i] == "{":
+                num_left_braces_open += 1
+                if left_brace_idx is None:
+                    left_brace_idx = i
+            elif s[i] == "}":
+                num_left_braces_open -= 1
+                if num_left_braces_open == 0:
+                    right_brace_idx = i
+                    break
+            i += 1
+        
+        if left_brace_idx is not None and right_brace_idx is not None:
+            return s[left_brace_idx + 1 : right_brace_idx].strip()
+        return None
+    
+    # 尝试提取 \boxed{} (支持嵌套)
+    boxed_answer = find_last_boxed(text)
+    if boxed_answer:
+        return boxed_answer
     
     # 尝试提取 <answer> </answer>
     answer_pattern = r'<answer>\s*(.*?)\s*</answer>'
     answer_match = re.search(answer_pattern, text, re.DOTALL)
     if answer_match:
         return answer_match.group(1).strip()
+    
+    # 尝试匹配 "answer is X" 或 "the answer is X" 模式
+    for pattern in [
+        r'(?:the\s+)?answer\s+is[:\s]+([^\n\.]+)',
+        r'(?:the\s+)?final\s+answer\s+is[:\s]+([^\n\.]+)',
+        r'=\s*([\d\.\-\/\\\{\}\^\s]+)\s*$',
+    ]:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
     
     # 如果都没有，返回最后一行非空内容
     lines = [line.strip() for line in text.split('\n') if line.strip()]
@@ -102,19 +143,19 @@ def good_accuracy(
         content = kwargs["solution_str"]
         sol = kwargs["ground_truth"]
         
-        # 提取模型答案
-        extracted_answer = extract_boxed_answer(content)
+        # 从 ground_truth 中提取答案（可能是完整解答包含 \boxed{}）
+        gt_answer = extract_boxed_answer(sol) if '\\boxed' in sol or '\\fbox' in sol else sol
         
-        # 使用 VERL 的 prime_math 验证
+        # 从模型输出中提取答案
+        model_answer = extract_boxed_answer(content)
+        
+        # 使用 grade_answer 比较（更鲁棒）
         is_correct = False
         try:
-            is_correct, format_correctness, _ = prime_math.compute_score(
-                model_output=extracted_answer,
-                ground_truth=sol
-            )
+            is_correct = prime_math.grade_answer(model_answer, gt_answer)
         except Exception as e:
-            print(f"验证失败: {e}, 回答: {extracted_answer}, 基准: {sol}")
-            is_correct = False
+            # 降级：直接字符串比较
+            is_correct = model_answer.strip() == gt_answer.strip()
 
         # === Reward Calculation ===
         final_reward = 0.0
@@ -183,20 +224,19 @@ def good_accuracy(
             raise ValueError(f"completions ({len(contents)}) 和 solution ({len(solution)}) 的数量必须匹配")
 
         for content, sol in zip(contents, solution):
+            # 从 ground_truth 中提取答案（可能是完整解答包含 \boxed{}）
+            gt_answer = extract_boxed_answer(sol) if '\\boxed' in sol or '\\fbox' in sol else sol
+            
+            # 从模型输出中提取答案
+            model_answer = extract_boxed_answer(content)
+            
+            # 使用 grade_answer 比较（更鲁棒）
             is_correct = False
-            
-            # 提取模型答案
-            extracted_answer = extract_boxed_answer(content)
-            
-            # 使用 VERL 的 prime_math 验证（基于 sympy）
             try:
-                is_correct, format_correctness, _ = prime_math.compute_score(
-                    model_output=extracted_answer,
-                    ground_truth=sol
-                )
+                is_correct = prime_math.grade_answer(model_answer, gt_answer)
             except Exception as e:
-                print(f"验证失败: {e}, 回答: {extracted_answer}, 基准: {sol}")
-                is_correct = False
+                # 降级：直接字符串比较
+                is_correct = model_answer.strip() == gt_answer.strip()
 
             # === Reward Calculation ===
             final_reward = 0.0
