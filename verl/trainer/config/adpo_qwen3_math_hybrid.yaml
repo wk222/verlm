@@ -40,9 +40,10 @@ actor_rollout_ref:
     external_lib: null
     override_config: {}
     enable_gradient_checkpointing: True
+    enable_activation_offload: True
     use_remove_padding: True
   actor:
-    strategy: fsdp
+    strategy: fsdp2
     ppo_mini_batch_size: 64
     ppo_micro_batch_size: null
     ppo_micro_batch_size_per_gpu: 8
