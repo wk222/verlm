@@ -86,23 +86,24 @@ python -m verl.trainer.main_adpo \
     data.max_response_length=1280 \
     data.truncation=right \
     actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enable_prefix_caching=True \
     actor_rollout_ref.rollout.max_num_seqs=192 \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.model.enable_activation_offload=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     trainer.n_gpus_per_node=${N_GPUS} \
     trainer.default_local_dir=${OUTPUT_DIR} \
+    trainer.project_name="ADPO-pk-GRPO" \
     trainer.experiment_name=qwen3-1.7b-adpo-wzx-4gpu \
+    wandb_config.project="ADPO-pk-GRPO" \
     wandb_config.name=qwen3-1.7b-adpo-wzx-4gpu \
     "$@"  # Pass any additional arguments
 

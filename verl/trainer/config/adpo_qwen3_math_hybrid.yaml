@@ -40,7 +40,7 @@ actor_rollout_ref:
     external_lib: null
     override_config: {}
     enable_gradient_checkpointing: True
-    enable_activation_offload: True
+    enable_activation_offload: False
     use_remove_padding: True
   actor:
     strategy: fsdp2
