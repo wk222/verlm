@@ -132,8 +132,20 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     reward_max = torch.max(non_aborted_sequence_reward).detach().item()
     reward_min = torch.min(non_aborted_sequence_reward).detach().item()
 
-    valid_adv = torch.masked_select(advantages, response_mask)
-    valid_returns = torch.masked_select(returns, response_mask)
+    # Handle both token-level and sequence-level advantages/returns
+    # Token-level: [batch_size, seq_len], Sequence-level: [batch_size]
+    if advantages.dim() == 2 and advantages.shape == response_mask.shape:
+        # Token-level advantages
+        valid_adv = torch.masked_select(advantages, response_mask)
+        valid_returns = torch.masked_select(returns, response_mask)
+    elif advantages.dim() == 1:
+        # Sequence-level advantages (e.g., ADPO, GRPO)
+        valid_adv = advantages[non_aborted_mask]
+        valid_returns = returns[non_aborted_mask] if returns.dim() == 1 else torch.masked_select(returns, response_mask)
+    else:
+        # Fallback: try masked_select
+        valid_adv = torch.masked_select(advantages, response_mask)
+        valid_returns = torch.masked_select(returns, response_mask)
 
     if use_critic:
         values = batch.batch["values"]

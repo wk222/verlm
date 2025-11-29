@@ -1,16 +1,37 @@
+# ADPO Training Configuration - Qwen3 on WZX MATH Dataset (Hybrid mode - 4 GPU)
+# Based on adpo_trainer.yaml with customizations for 4-GPU setup
+# ADPO does not require a critic model
+
+# Specify default configs from base templates
+defaults:
+  - actor@actor_rollout_ref.actor: dp_actor
+  - data@data: legacy_data
+  - rollout@actor_rollout_ref.rollout: rollout
+  - model@actor_rollout_ref.model: hf_model
+  - critic@critic: dp_critic
+  - reward_model@reward_model: dp_reward_model
+  - algorithm@algorithm.rollout_correction: rollout_correction
+  - _self_
+
+# Critic configuration (disabled for ADPO)
+critic:
+  enable: False
+
+# Data configuration
 data:
   train_files: $DATA_DIR/train.parquet
-  val_files: $DATA_DIR/test.parquet
-  prompt_key: problem
-  max_prompt_length: 700
-  max_response_length: 1200
-  train_batch_size: 8
-  val_batch_size: 8
-  shuffle: true
+  val_files: $DATA_DIR/train.parquet
+  prompt_key: prompt
+  max_prompt_length: 512  # Reduced for faster processing
+  max_response_length: 1024  # Reduced for faster processing
+  train_batch_size: 64  # Increased from 32
+  val_batch_size: 64  # Increased from 32
+  shuffle: false  # Set to false for reproducibility
   dataloader_num_workers: 0  # Number of workers for dataloader
   return_raw_input_ids: False  # For vLLM rollout
-  return_raw_chat: False
+  return_raw_chat: False  # Required for agent loop (raw_prompt)
 
+# Actor, rollout, and reference model configuration
 actor_rollout_ref:
   hybrid_engine: True
   model:
@@ -20,85 +41,114 @@ actor_rollout_ref:
     enable_gradient_checkpointing: True
     use_remove_padding: True
   actor:
-    strategy: fsap  # FSDP
-    ppd: 1
-    mpd: 1
-    ppo_mini_batch_size: 256
+    strategy: fsdp  # FSDP (Fully Sharded Data Parallel)
+    ppo_mini_batch_size: 128  # Increased from 32
     ppo_micro_batch_size: null
+    ppo_micro_batch_size_per_gpu: 8  # Increased from 4
+    use_kl_loss: False
+    policy_loss:
+      loss_mode: adpo  # Use ADPO policy loss function
     optim:
       lr: 1.5e-5
     fsdp_config:
       wrap_policy:
         # Transformer layer wrapper
         min_num_params: 0
-      param_offload: False
-      grad_offload: False
+      param_offload: False  # Disable offload for speed (we have enough VRAM)
       optimizer_offload: False
   rollout:
     name: vllm
-    mode: async
+    mode: sync  # Use sync mode (simpler, no agent loop required)
     temperature: 1.0
     top_k: -1 # 0 in some configs, -1 usually means disabled or all
     top_p: 1.0
     n: 8 # num_generations
-    gpu_memory_utilization: 0.4
+    gpu_memory_utilization: 0.6  # Increased from 0.4 to use more VRAM
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: 16  # Increased from 4
     ignore_eos: False
     enforce_eager: False
-    free_cache_after_step: True
+    free_cache_engine: True
     do_sample: True
-  ref:
-    fsdp_config:
-      param_offload: True
-      grad_offload: True
-      optimizer_offload: True
-    log_prob_micro_batch_size: 4 # Adjust based on VRAM
 
+# Algorithm configuration for ADPO
 algorithm:
   adv_estimator: adpo
+  
+  # Required by base trainer (not used by ADPO, but needed for compatibility)
+  gamma: 1.0
+  lam: 1.0
+  
+  # ADPO does not use KL penalty (on-policy mode)
+  use_kl_in_reward: False
   kl_ctrl:
     type: fixed
-    kl_coef: 0.0 # beta_anchor_kl
+    kl_coef: 0.0
   
   # ADPO Hyperparameters
   tau: 1.0
   use_adaptive_tau: True
   adaptive_tau_alpha: 0.7
   adaptive_tau_min: 0.3
-  adaptive_tau_beta: 0.5 # New param we added
-  adaptive_tau_max: 1.0 # New param we added
+  adaptive_tau_beta: 0.5
+  adaptive_tau_max: 1.0
   beta_reward: 0.8
   drop_all_failed_prompts: False
   
   # Gradient Accumulation
-  global_batch_size: 64 # 8 * 8 = 64 (approx, adjust based on num_gpus)
+  global_batch_size: 32 # Tuned for 4x4090 setup
 
+# Trainer configuration
 trainer:
   total_epochs: 2
   project_name: open-r1-ADPO
   experiment_name: qwen3-1.7b-adpo-baseline
   logger: ['wandb', 'console']
   nnodes: 1
-  n_gpus_per_node: 8
+  n_gpus_per_node: 4
   save_freq: -1
-  test_freq: 1
+  test_freq: -1
   val_before_train: False
-  seed: 42  # Random seed for reproducibility
+  seed: 42
   default_hdfs_dir: null
   default_local_dir: null
+  device: cuda
+  balance_batch: True
+  total_training_steps: null
+  log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
+  esi_redundant_time: 0
+  resume_mode: auto
+  resume_from_path: null
+  val_only: False
+  critic_warmup: 0
+  del_local_ckpt_after_load: False
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  ray_wait_register_center_timeout: 300
+  use_legacy_worker_impl: auto
 
-reward_model:
-  enable: True
-  reward_manager: custom
+# Custom reward function (good_accuracy from ADPO)
+custom_reward_function:
+  path: verl/trainer/adpo/reward.py
+  name: good_accuracy
   reward_kwargs:
-    mode: math_adpo # Points to our new reward file
-    ngram_size: 3
-    max_penalty: -1.0
-    penalty_scale_factor: 0.1
+    ngram_size: 4
+    max_penalty: -0.5
+    penalty_scale_factor: 0.5
     length_reward_scale: 2000.0
     length_reward_max: 0.1
     repetition_threshold: 0.3
     repetition_threshold_penalty: -0.5
 
+# Reward model configuration
+# ADPO uses custom_reward_function (good_accuracy), no external RM needed
+reward_model:
+  enable: False
+
+# WandB logging configuration
 wandb_config:
   project: open-r1-ADPO
   entity: null
@@ -110,6 +160,7 @@ wandb_config:
     - math
     - reasoning
 
+# Ray distributed computing configuration
 ray_kwargs:
   ray_init:
     runtime_env:
@@ -120,5 +171,12 @@ ray_kwargs:
     num_cpus: null
   timeline_json_file: null
 
+# Transfer queue configuration
 transfer_queue:
   enable: False
+
+# Global profiler configuration
+global_profiler:
+  tool: none
+  steps: []
+  profile_continuous_steps: false
