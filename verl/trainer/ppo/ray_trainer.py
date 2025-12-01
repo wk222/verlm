@@ -261,6 +261,31 @@ def compute_advantage(
         advantages, returns = adv_estimator_fn(**adv_kwargs)
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        
+        # For ADPO: pre-compute q_target so policy_loss doesn't need groupwise ops
+        # This allows micro_batch_size < num_generations
+        if adv_estimator == "adpo" and "uid" in data.non_tensor_batch:
+            import torch.nn.functional as F
+            from collections import defaultdict
+            
+            index = data.non_tensor_batch["uid"]
+            beta_reward = config.get("beta_reward", 0.5) if config else 0.5
+            
+            # Compute softmax within groups
+            batch_size = advantages.shape[0]
+            id2indices = defaultdict(list)
+            for i in range(batch_size):
+                id2indices[index[i]].append(i)
+            
+            q_target = torch.zeros_like(advantages)
+            for idx, indices in id2indices.items():
+                indices_tensor = torch.tensor(indices, device=advantages.device, dtype=torch.long)
+                group_adv = advantages[indices_tensor]
+                group_softmax = F.softmax(group_adv / beta_reward, dim=0)
+                q_target[indices_tensor] = group_softmax
+            
+            data.batch["q_target"] = q_target
+            
     return data
 
 
@@ -929,34 +954,108 @@ class RayPPOTrainer:
         gpu_mem_util = conf.actor_rollout_ref.rollout.gpu_memory_utilization
         micro_bsz = conf.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu", None)
         mini_bsz = conf.actor_rollout_ref.actor.get("ppo_mini_batch_size", None)
-        tau_beta = getattr(conf.algorithm, "adaptive_tau_beta", None)
+        lr = conf.actor_rollout_ref.actor.optim.get("lr", None)
         repo_id = conf.trainer.get('hub_model_id','<your/repo>')
         metrics_hint = f"Global step: {self.global_steps}"
+        
+        # ADPO specific hyperparameters
+        tau = getattr(conf.algorithm, "tau", None)
+        beta_reward = getattr(conf.algorithm, "beta_reward", None)
+        clip_log_ratio = getattr(conf.algorithm, "clip_log_ratio", None)
+        clip_anchored_score = getattr(conf.algorithm, "clip_anchored_score", None)
+        use_length_normalization = getattr(conf.algorithm, "use_length_normalization", None)
+        use_adaptive_tau = getattr(conf.algorithm, "use_adaptive_tau", None)
+        adaptive_tau_alpha = getattr(conf.algorithm, "adaptive_tau_alpha", None)
+        adaptive_tau_min = getattr(conf.algorithm, "adaptive_tau_min", None)
+        adaptive_tau_max = getattr(conf.algorithm, "adaptive_tau_max", None)
+        entropy_coef = getattr(conf.algorithm, "entropy_coef", None)
+        grad_clip_value = getattr(conf.algorithm, "grad_clip_value", None)
+        num_generations = getattr(conf.algorithm, "num_generations", None)
+        
+        # Build ADPO hyperparameters section
+        adpo_params = ""
+        if adv_estimator == "adpo":
+            adpo_params = (
+                f"\n## ADPO Hyperparameters\n"
+                f"| Parameter | Value |\n"
+                f"|-----------|-------|\n"
+                f"| tau | `{tau}` |\n"
+                f"| beta_reward | `{beta_reward}` |\n"
+                f"| clip_log_ratio | `{clip_log_ratio}` |\n"
+                f"| clip_anchored_score | `{clip_anchored_score}` |\n"
+                f"| use_length_normalization | `{use_length_normalization}` |\n"
+                f"| use_q_centering | `{use_q_centering}` |\n"
+                f"| use_adaptive_tau | `{use_adaptive_tau}` |\n"
+                f"| adaptive_tau_alpha | `{adaptive_tau_alpha}` |\n"
+                f"| adaptive_tau_min | `{adaptive_tau_min}` |\n"
+                f"| adaptive_tau_max | `{adaptive_tau_max}` |\n"
+                f"| entropy_coef | `{entropy_coef}` |\n"
+                f"| grad_clip_value | `{grad_clip_value}` |\n"
+                f"| num_generations | `{num_generations}` |\n"
+            )
+        
         md = (
             f"# VERL ADPO: {task_name}\n\n"
             f"本模型由 VERL (Ray PPO/ADPO) 训练生成，并在训练结束自动上传。\n\n"
+            f"## Model Info\n"
             f"- 基础模型: `{model_path}`\n"
             f"- 训练框架: VERL (Ray + FSDP + vLLM)\n"
             f"- 任务: `{task_name}`\n"
             f"- 总 Epoch: `{total_epochs}`\n"
             f"- 精度: `{dtype}`\n"
-            f"- 优势估计: `{adv_estimator}` (use_q_centering={use_q_centering}, use_kde_advantage={use_kde_advantage}, scale_rewards={scale_rewards})\n"
+            f"- 学习率: `{lr}`\n"
+            f"\n## Training Config\n"
+            f"- 优势估计: `{adv_estimator}`\n"
             f"- 采样并发: rollout.n=`{rollout_n}`, max_num_seqs=`{max_num_seqs}`, gpu_memory_utilization=`{gpu_mem_util}`\n"
             f"- 训练批量: ppo_mini_batch_size=`{mini_bsz}`, ppo_micro_batch_size_per_gpu=`{micro_bsz}`\n"
-            f"- 自适应温度: adaptive_tau_beta=`{tau_beta}`\n\n"
-            f"## 快速使用\n"
+            f"{adpo_params}"
+            f"\n## Quick Start\n"
             f"```python\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\n"
             f"model = AutoModelForCausalLM.from_pretrained(\"{repo_id}\")\n"
             f"tokenizer = AutoTokenizer.from_pretrained(\"{repo_id}\")\n"
             f"print(model.config)\n```\n\n"
-            f"## 训练摘要\n"
+            f"## Training Summary\n"
             f"- {metrics_hint}\n"
             f"- 检查点目录: `global_step_{self.global_steps}/actor/`\n\n"
-            f"## 许可与责任\n"
+            f"## License\n"
             f"请遵循上游基础模型与数据集的许可条款。本模型卡由 VERL 自动生成。\n"
         )
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write(md)
+        
+        # Also save hyperparameters as JSON for programmatic access
+        import json
+        hyperparams = {
+            "model_path": model_path,
+            "task_name": task_name,
+            "total_epochs": total_epochs,
+            "dtype": str(dtype),
+            "lr": lr,
+            "adv_estimator": adv_estimator,
+            "rollout_n": rollout_n,
+            "ppo_mini_batch_size": mini_bsz,
+            "ppo_micro_batch_size_per_gpu": micro_bsz,
+            "global_steps": self.global_steps,
+        }
+        if adv_estimator == "adpo":
+            hyperparams.update({
+                "tau": tau,
+                "beta_reward": beta_reward,
+                "clip_log_ratio": clip_log_ratio,
+                "clip_anchored_score": clip_anchored_score,
+                "use_length_normalization": use_length_normalization,
+                "use_q_centering": use_q_centering,
+                "use_adaptive_tau": use_adaptive_tau,
+                "adaptive_tau_alpha": adaptive_tau_alpha,
+                "adaptive_tau_min": adaptive_tau_min,
+                "adaptive_tau_max": adaptive_tau_max,
+                "entropy_coef": entropy_coef,
+                "grad_clip_value": grad_clip_value,
+                "num_generations": num_generations,
+            })
+        hyperparams_path = os.path.join(actor_folder, "training_hyperparams.json")
+        with open(hyperparams_path, "w", encoding="utf-8") as f:
+            json.dump(hyperparams, f, indent=2, ensure_ascii=False)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1422,16 +1521,9 @@ class RayPPOTrainer:
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
-                self.global_steps += 1
-
-                if (
-                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
-                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-                ):
-                    self.actor_rollout_wg.dump_memory_snapshot(
-                        tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-                    )
-
+                
+                # Handle final step BEFORE incrementing global_steps
+                # so that checkpoint is saved with the correct step number
                 if is_last_step:
                     # Ensure final checkpoint saved even if save_freq disabled.
                     if self.config.trainer.get("hub_final_upload", True) or self.config.trainer.get("save_each_epoch", False):
@@ -1444,6 +1536,16 @@ class RayPPOTrainer:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
+                
+                self.global_steps += 1
+
+                if (
+                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
+                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
+                ):
+                    self.actor_rollout_wg.dump_memory_snapshot(
+                        tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
+                    )
 
             # end of epoch hook (executed only if not broken by return)
             if self.config.trainer.get("save_each_epoch", False):

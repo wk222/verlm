@@ -27,7 +27,7 @@ data:
   train_batch_size: 128
   val_batch_size: 64
   truncation: left
-  shuffle: false
+  shuffle: true  # 必须 shuffle，否则训练不稳定
   dataloader_num_workers: 0
   return_raw_input_ids: False
   return_raw_chat: False
@@ -44,13 +44,14 @@ actor_rollout_ref:
     use_remove_padding: True
   actor:
     strategy: fsdp2
-    ppo_mini_batch_size: 64
+    ppo_mini_batch_size: 60         # [修改] 从 64 改为 60 (能被 6 整除)
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 8
+    ppo_micro_batch_size_per_gpu: 6  # 与 GSPO 一致
     use_dynamic_bsz: False
     use_kl_loss: False
     policy_loss:
       loss_mode: adpo
+      num_generations: 6              # [修改] 从 8 改为 6，以支持 Plackett-Luce
     optim:
       lr: 1e-6
     fsdp_config:
@@ -66,7 +67,7 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    n: 8
+    n: 6                            # [修改] 从 8 改为 6
     gpu_memory_utilization: 0.55
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
@@ -83,6 +84,9 @@ actor_rollout_ref:
 algorithm:
   adv_estimator: adpo
   
+  # 统一定义 num_generations，避免命令行重复写
+  num_generations: 6                # [修改] 从 8 改为 6
+  
   # Required by base trainer (not used by ADPO, but needed for compatibility)
   gamma: 1.0
   lam: 1.0
@@ -93,28 +97,58 @@ algorithm:
     type: fixed
     kl_coef: 0.0
   
-  # ADPO Hyperparameters
-  tau: 1.0
-  use_adaptive_tau: True
-  adaptive_tau_alpha: 0.7
-  adaptive_tau_min: 0.3
-  adaptive_tau_beta: 0.5
-  adaptive_tau_max: 1.0
-  beta_reward: 0.8
+  # ============================================================
+  # ADPO Core Hyperparameters
+  # ============================================================
+  # Loss变体：
+  #   "pairwise"             : DPO风格 -log σ(u_w - u_l) ⭐推荐
+  #   "plackett_luce"        : P-L模型/ListMLE，完整排序对齐
+  #   "plackett_luce_approx" : P-L近似版（只看top-k）
+  #   "direct"               : -q·u + logsumexp(u)
+  #   "infonce"              : -u_best + logsumexp(u)  
+  #   "softmax"              : 原始ADPO
+  #   "scaled"               : 原始ADPO × grad_scale_factor
+  # ============================================================
+  
+  loss_variant: plackett_luce     # [修改] 启用 Plackett-Luce，最强排序信号
+  tau: 0.1                        # [优化] P-L 梯度强，稍微调大 tau (0.05->0.1) 增加鲁棒性
+  beta_reward: 0.05               # [优化] 保持锐利，增强排序信号
+  clip_anchored_score: 10.0       # anchored_scores裁剪范围
+  clip_log_ratio: 5.0             # log_ratio裁剪
+  use_length_normalization: True  # 长度归一化
+  grad_scale_factor: 20.0         # scaled变体使用
+  plackett_luce_top_k: 6          # [优化] 使用全量 Top-6 (等于 num_generations)
+  logit_reg_coef: 0.01            # Z-Loss 系数，防止 Logits 爆炸 (建议 0.001~0.01)
+  use_q_center: True              # Q-加权中心化，消除平移不变性 (建议开启)
+  
+  # ============================================================
+  # 自适应温度策略
+  # ============================================================
+  # 公式：τ_eff = τ × (1 + α·h_static + β·c·(-s))
+  # - 高置信+高奖励 → 降温 → 追高
+  # - 高置信+低奖励 → 升温 → 刹车
+  use_adaptive_tau: True          # 开启自适应温度
+  adaptive_tau_alpha: 0.2         # 静态防御系数
+  adaptive_tau_beta: 0.5          # 追高/刹车系数
+  adaptive_tau_min: 0.2           # τ下限
+  adaptive_tau_max: 1.5           # τ上限
+  vocab_size: 151936              # Qwen3 vocab size
+  
+  # ============================================================
+  # 梯度稳定化
+  # ============================================================
+  grad_clip_value: 0.0            # loss级别裁剪，0=不裁剪
+  
+  # Advantage Estimation
+  scale_rewards: False
   drop_all_failed_prompts: False
   
-  # Advantage Estimation Configuration
-  scale_rewards: False        # Whether to normalize advantages by std
-  use_kde_advantage: False    # Whether to use KDE-based advantage estimation
-  kde_bandwidth_factor: 1.0   # Bandwidth multiplier for KDE
-  use_q_centering: True       # Whether to center logits using Q-target (Numerical Stability)
-  
   # Gradient Accumulation
-  global_batch_size: 32 # Tuned for 4x4090 setup
+  global_batch_size: 32
 
 # Trainer configuration
 trainer:
-  total_epochs: 2
+  total_epochs: 2  # 与 GSPO 保持一致
   project_name: open-r1-ADPO
   experiment_name: qwen3-1.7b-adpo-baseline
   logger: ['wandb', 'console']

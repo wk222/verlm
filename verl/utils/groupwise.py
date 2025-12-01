@@ -46,7 +46,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from verl.utils.device import get_torch_device
+from verl.utils.device import get_device_name
 
 __all__ = ["as_torch_index", "group_mean_std"]
 
@@ -61,6 +61,9 @@ def _resolve_device(explicit: Optional[torch.device | str]) -> torch.device:
       4) cuda if available, else cpu
     """
     if explicit is not None:
+        # Handle case where explicit is a torch.device or string
+        if isinstance(explicit, torch.device):
+            return explicit
         return torch.device(explicit)
 
     forced = os.getenv("VERL_FORCE_DEVICE")
@@ -71,7 +74,10 @@ def _resolve_device(explicit: Optional[torch.device | str]) -> torch.device:
     if "PYTEST_CURRENT_TEST" in os.environ:
         return torch.device("cpu")
 
-    return get_torch_device()
+    # Use get_device_name() which returns a string like "cuda", "cpu", etc.
+    # Then construct a proper torch.device from it
+    device_name = get_device_name()
+    return torch.device(device_name)
 
 
 def _to_1d_numpy_object_array(x: Any) -> np.ndarray:

@@ -51,13 +51,26 @@ echo "🚀 Starting GSPO training..."
 echo ""
 
 # ============================================================
-# GSPO 配置说明:
+# GSPO 全序列级优化版配置说明:
 # ============================================================
-# - adv_estimator: grpo (使用GRPO的advantage估计)
-# - policy_loss.loss_mode: gspo (句级概率重要性比例)
-# - loss_agg_mode: seq-mean-token-mean (GSPO推荐的聚合方式)
-# - clip_ratio_high: 0.28 (GSPO论文推荐的非对称裁剪)
-# - 其他配置与ADPO保持一致以保证公平对比
+# 核心优化: 从 Advantage Estimator 到 Policy Loss 全程序列级别计算
+#
+# 1. adv_estimator: grpo_seq (序列级GRPO，返回 (B,) 而非 (B,T))
+#    - 原版 grpo 返回 (B, T) 张量，每个token复制相同advantage值
+#    - grpo_seq 返回 (B,) 张量，直接是序列级别
+#    - 显存节省: advantages 从 B*T → B (例: 512*1280 → 512)
+#
+# 2. policy_loss.loss_mode: gspo (自动检测维度，选择最优路径)
+#    - 当 advantages 是 (B,) 时：全程序列级计算，高效
+#    - 当 advantages 是 (B,T) 时：回退到token级计算，兼容
+#    - 与 grpo_seq 配合使用时，性能与 ADPO 相当
+#
+# 3. 性能提升 (grpo_seq + gspo):
+#    - 显存: 与 ADPO 相当 (advantages 从 B*T → B)
+#    - 速度: 向量化操作，无Python循环
+#    - 吞吐: 可以使用更大的 micro_batch_size
+#
+# 4. clip_ratio_high: 0.28 (GSPO论文推荐的非对称裁剪)
 # ============================================================
 
 python -m verl.trainer.main_ppo \
@@ -80,6 +93,8 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.actor.ppo_mini_batch_size=24 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=6 \
+    actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
+    actor_rollout_ref.actor.loss_agg_mode=token-mean \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \

@@ -48,27 +48,21 @@ fi
 echo "🚀 Starting ADPO training..."
 echo ""
 
-# Batch Size Calculation for 4x4090 (24GB VRAM each):
 # ============================================================
-# 目标显存占用: 20-22GB (85-90%) - 激进优化版
+# 激进版配置 - 提高ADPO的梯度范数
 # ============================================================
-# 配置说明:
-# - train_batch_size=64
-# - ppo_mini_batch_size=24 (调整以适配 micro_batch=6)
-# - ppo_micro_batch_size_per_gpu=6: 4->6 提升训练吞吐
-# - log_prob_micro_batch_size_per_gpu=32: 16->32 加速 log_prob
-# - gpu_memory_utilization=0.65: 0.5->0.65 加速 rollout
-# - rollout.n=8
+# 问题诊断：
+# - ADPO使用softmax结构，梯度被压缩到GSPO的约1/50
+# - 原因：softmax_grad(max 0.25) × q_target(1/8) × 1/tau(1.25) ≈ 0.03
 #
-# ============================================================
-# Batch Size 约束条件验证:
-# ============================================================
-# 1. normalized_ppo_mini_batch_size = 24 * 8 / 4 = 48
+# 解决方案（在yaml中已调整）：
+# - tau: 0.8 → 0.3 (让anchored_scores更大，softmax更尖锐)
+# - beta_reward: 0.6 → 0.25 (让q_target分布更尖锐)
+# - clip_anchored_score: 5.0 → 10.0 (放宽裁剪)
+# - use_q_centering: True → False (移除额外的梯度衰减)
+# - lr: 1e-6 → 5e-6 (补偿较小的有效梯度)
 #
-# 2. 约束: 48 % 6 == 0 ✓ (完美整除)
-#
-# 3. 显存预估:
-#    micro_batch 4->6, 预计显存从 63% 提升至 ~85%
+# 预期效果：梯度范数从0.01提升到0.1-0.3范围
 # ============================================================
 
 python -m verl.trainer.main_adpo \
@@ -80,7 +74,6 @@ python -m verl.trainer.main_adpo \
     data.max_prompt_length=880 \
     data.max_response_length=1280 \
     data.truncation=right \
-    data.shuffle=True \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.enforce_eager=False \

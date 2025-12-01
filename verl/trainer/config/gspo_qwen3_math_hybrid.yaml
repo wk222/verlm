@@ -46,14 +46,15 @@ actor_rollout_ref:
     strategy: fsdp2
     ppo_mini_batch_size: 64
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 8
+    ppo_micro_batch_size_per_gpu: 6  # 与 ADPO 相同 - gspo_seq 已经是序列级别，显存占用一致
     use_dynamic_bsz: False
     use_kl_loss: False
-    # GSPO uses gspo loss mode (sentence-level probability)
+    # GSPO loss: auto-detects advantages dimension for optimal computation
+    # When paired with grpo_seq (returns B,), uses efficient sequence-level path
     policy_loss:
       loss_mode: gspo
-    # 注意 GSPO 推荐使用 seq-mean-token-mean 聚合
-    loss_agg_mode: seq-mean-token-mean
+    # Note: loss_agg_mode is ignored by gspo (it handles aggregation internally)
+    loss_agg_mode: token-mean
     # Clip ratio配置
     clip_ratio: 0.2
     clip_ratio_low: 0.2
@@ -86,10 +87,11 @@ actor_rollout_ref:
     free_cache_engine: True
     do_sample: True
 
-# Algorithm configuration for GSPO
+# Algorithm configuration for GSPO (Optimized)
 algorithm:
-  # GSPO uses GRPO advantage estimator
-  adv_estimator: grpo
+  # GSPO uses sequence-level GRPO advantage estimator (returns B, not B*T)
+  # This reduces memory by ~1000x compared to standard grpo
+  adv_estimator: grpo_seq
   
   # Required by base trainer
   gamma: 1.0
@@ -109,7 +111,7 @@ algorithm:
 
 # Trainer configuration
 trainer:
-  total_epochs: 2
+  total_epochs: 3
   project_name: ADPO-pk-GRPO
   experiment_name: qwen3-1.7b-gspo-baseline
   logger: ['wandb', 'console']

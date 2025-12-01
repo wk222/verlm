@@ -48,7 +48,7 @@ actor_rollout_ref:
     strategy: fsdp2
     ppo_mini_batch_size: 64
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 8
+    ppo_micro_batch_size_per_gpu: 6  # 与ADPO保持一致
     use_dynamic_bsz: False
     use_kl_loss: False
     # DAPO uses GRPO-style loss with dynamic clipping

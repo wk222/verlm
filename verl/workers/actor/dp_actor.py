@@ -398,9 +398,15 @@ class DataParallelPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        # Include pre-computed q_target for ADPO (enables micro_batch < num_generations)
+        if "q_target" in data.batch.keys():
+            select_keys.append("q_target")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+        # Include uid for ADPO index-based grouping
+        if "uid" in data.non_tensor_batch.keys():
+            non_tensor_select_keys.append("uid")
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
@@ -463,6 +469,11 @@ class DataParallelPPOActor(BasePPOActor):
                     # Extract pre-computed rollout correction weights if present
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
+                    
+                    # Extract pre-computed q_target and index for ADPO
+                    # This allows ADPO to work with micro_batch_size < num_generations
+                    q_target = model_inputs.get("q_target", None)
+                    index = micro_batch.non_tensor_batch.get("uid", None) if hasattr(micro_batch, 'non_tensor_batch') else None
 
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
@@ -477,6 +488,8 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_agg_mode=loss_agg_mode,
                         config=self.config,
                         rollout_is_weights=rollout_is_weights,
+                        q_target=q_target,  # For ADPO: pre-computed q_target
+                        index=index,  # For ADPO: group index (uid)
                     )
                     micro_batch_metrics.update(pg_metrics)
 
