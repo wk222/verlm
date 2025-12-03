@@ -193,10 +193,17 @@ def adpo_policy_loss(
     grad_clip_value = _cfg("grad_clip_value", 0.0)
     clip_log_ratio = _cfg("clip_log_ratio", 5.0)
 
-    # Poly-Loss Config
-    # 默认开启 Poly-Loss (特别是对于 P-L Loss)
+    # Poly-Loss Config (仅用于 Plackett-Luce Loss)
+    # 默认开启 Poly-Loss
     use_poly_loss = _cfg("use_poly_loss", True)
     poly_epsilon = _cfg("poly_epsilon", 1.0)
+    
+    # Softmax 变体的新公式参数: u = ℓ - A·ℓ_ref - B·q
+    # 系数 A 控制 reference model 的锚定强度 (默认 1.0)
+    # 系数 B 控制 target distribution q 的减法项 (默认 0.5)
+    # 默认公式: u = log_prob - 1.0 * old_log_prob - 0.5 * q
+    softmax_coef_A = _cfg("softmax_coef_A", 1.0)
+    softmax_coef_B = _cfg("softmax_coef_B", 0.5)
     
     # ============================================================
     # Step 1: 计算序列级log prob
@@ -351,25 +358,32 @@ def adpo_policy_loss(
             loss = (-u_best + logsumexp_u).mean()
             
         elif loss_variant == "softmax":
-            log_p = F.log_softmax(u, dim=-1)
-            if use_poly_loss:
-                p_tilde = torch.exp(log_p)
-                # Poly-ADPO: sum(q * (-log_p + epsilon * (1 - p)))
-                ce_term = -(q.detach() * log_p).sum(dim=-1)
-                poly_term = (q.detach() * poly_epsilon * (1.0 - p_tilde)).sum(dim=-1)
-                loss = (ce_term + poly_term).mean()
-            else:
-                loss = -(q.detach() * log_p).sum(dim=-1).mean()
+            # 新公式: u = ℓ - A·ℓ_ref - B·q
+            # 原始 u = (ℓ - ℓ_ref) / τ，需要重新构造
+            # seq_log_prob = ℓ (当前模型), seq_old_log_prob = ℓ_ref
+            # 注意: u 已经是 log_ratio / τ，这里我们需要从原始值重新计算
+            # 实际上 log_ratio = ℓ - ℓ_ref，所以 u = log_ratio / τ
+            # 新公式: u_new = (ℓ - A·ℓ_ref - B·q) / τ
+            #       = ℓ/τ - A·ℓ_ref/τ - B·q/τ
+            #       = (ℓ - ℓ_ref)/τ + (1-A)·ℓ_ref/τ - B·q/τ
+            #       = u + (1-A)·ℓ_ref/τ - B·q/τ
+            # 但我们需要 seq_old_log_prob 的 reshaped 版本
+            seq_old_log_prob_reshaped = seq_old_log_prob.view(num_prompts, G)
+            
+            # u_new = u - (A-1)·ℓ_ref/τ - B·q/τ
+            # 当 A=1, B=0 时，u_new = u (标准 ADPO)
+            u_new = u - (softmax_coef_A - 1.0) * seq_old_log_prob_reshaped / effective_tau - softmax_coef_B * q.detach() / effective_tau
+            
+            log_p = F.log_softmax(u_new, dim=-1)
+            loss = -(q.detach() * log_p).sum(dim=-1).mean()
             
         elif loss_variant == "scaled":
-            log_p = F.log_softmax(u, dim=-1)
-            if use_poly_loss:
-                p_tilde = torch.exp(log_p)
-                ce_term = -(q.detach() * log_p).sum(dim=-1)
-                poly_term = (q.detach() * poly_epsilon * (1.0 - p_tilde)).sum(dim=-1)
-                loss = (ce_term + poly_term).mean() * grad_scale_factor
-            else:
-                loss = -(q.detach() * log_p).sum(dim=-1).mean() * grad_scale_factor
+            # 同样使用新公式
+            seq_old_log_prob_reshaped = seq_old_log_prob.view(num_prompts, G)
+            u_new = u - (softmax_coef_A - 1.0) * seq_old_log_prob_reshaped / effective_tau - softmax_coef_B * q.detach() / effective_tau
+            
+            log_p = F.log_softmax(u_new, dim=-1)
+            loss = -(q.detach() * log_p).sum(dim=-1).mean() * grad_scale_factor
             
         else:
             raise ValueError(f"Unknown loss_variant: {loss_variant}")
@@ -428,27 +442,13 @@ def adpo_policy_loss(
                 # 记录 logsumexp (用于 Z-Loss)
                 logsumexp_flat[indices_tensor] = torch.logsumexp(group_u, dim=0)
             
-            # 交叉熵 loss
-            if use_poly_loss:
-                p_flat = torch.exp(log_p_flat)
-                # Poly-ADPO: sum(q * (-log_p + epsilon * (1 - p)))
-                ce_term = -(q_flat.detach() * log_p_flat)
-                poly_term = q_flat.detach() * poly_epsilon * (1.0 - p_flat)
-                loss = (ce_term + poly_term).sum() / batch_size
-            else:
-                loss = -(q_flat.detach() * log_p_flat).sum() / batch_size
+            # 交叉熵 loss (Index Mode 不支持新公式，使用标准 CE)
+            loss = -(q_flat.detach() * log_p_flat).sum() / batch_size
         else:
             # 没有 index，fallback 到整体 softmax（可能不正确但有梯度）
             log_p_flat = F.log_softmax(u_flat_centered, dim=0)
             logsumexp_flat = torch.logsumexp(u_flat_centered, dim=0).expand_as(u_flat_centered)
-            
-            if use_poly_loss:
-                p_flat = torch.exp(log_p_flat)
-                ce_term = -(q_flat.detach() * log_p_flat)
-                poly_term = q_flat.detach() * poly_epsilon * (1.0 - p_flat)
-                loss = (ce_term + poly_term).mean()
-            else:
-                loss = -(q_flat.detach() * log_p_flat).mean()
+            loss = -(q_flat.detach() * log_p_flat).mean()
         
         # 记录分项 (Index Mode)
         term_logsumexp = logsumexp_flat.mean().detach()
