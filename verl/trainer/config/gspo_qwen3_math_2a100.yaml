@@ -1,5 +1,5 @@
-# ADPO Training Configuration - Qwen3 on WZX MATH Dataset (2x A100 80GB)
-# Softmax loss variant with larger batch sizes
+# GSPO Training Configuration - Qwen3 on WZX MATH Dataset (2x A100 80GB)
+# GSPO = GRPO + Sequence-level Probability (Fair comparison with ADPO)
 
 # Specify default configs from base templates
 defaults:
@@ -12,18 +12,18 @@ defaults:
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
 
-# Critic configuration (disabled for ADPO)
+# Critic configuration (disabled for GSPO/GRPO)
 critic:
   enable: False
 
-# Data configuration - A100 80GB 可以用更大的 batch size
+# Data configuration
 data:
   train_files: $DATA_DIR/train.parquet
   val_files: $DATA_DIR/train.parquet
   prompt_key: prompt
   max_prompt_length: 1024
   max_response_length: 1280
-  train_batch_size: 64            # A100 可以更大
+  train_batch_size: 64            # Match ADPO
   val_batch_size: 64
   truncation: left
   shuffle: true
@@ -43,16 +43,23 @@ actor_rollout_ref:
     use_remove_padding: True
   actor:
     strategy: fsdp2
-    ppo_mini_batch_size: 64         # A100 80GB 可以用更大的 mini batch
+    ppo_mini_batch_size: 64         # Match ADPO
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 32   # A100 80GB 可以用较大的 micro batch
+    ppo_micro_batch_size_per_gpu: 32   # Match ADPO
     use_dynamic_bsz: False
     use_kl_loss: False
+    
+    # GSPO Specific Policy Loss
     policy_loss:
-      loss_mode: adpo
-      num_generations: *N_GENS
+      loss_mode: gspo
+      clip_ratio: 0.2               # Standard PPO/GRPO clipping
+      entropy_coef: 0.0             # Usually 0 for reasoning tasks
+    
+    # Loss Aggregation (GSPO handles this internally, but set for safety)
+    loss_agg_mode: token-mean
+    
     optim:
-      lr: 1e-6
+      lr: 1e-6                      # Match ADPO
     fsdp_config:
       wrap_policy:
         min_num_params: 0
@@ -66,81 +73,42 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    n: &N_GENS 16                    # 16 generations per prompt (Anchor defined here)
-    gpu_memory_utilization: 0.6     # A100 80GB 可以用更多显存
+    n: &N_GENS 16                    # Match ADPO (16 generations)
+    gpu_memory_utilization: 0.6     # Match ADPO
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 32  # A100 可以更大
-    max_num_seqs: 1024              # [优化] 1.7B模型在A100上可以开很大，加速Rollout
-    ignore_eos: False               # [保持False] 数学推理任务需要模型自然停止
+    log_prob_micro_batch_size_per_gpu: 32  # Match ADPO
+    max_num_seqs: 1024              # Match ADPO
+    ignore_eos: False               # Match ADPO
     enforce_eager: False
     enable_chunked_prefill: True
     enable_prefix_caching: True
     free_cache_engine: True
     do_sample: True
 
-# Algorithm configuration for ADPO
+# Algorithm configuration for GSPO
 algorithm:
-  adv_estimator: adpo
-  num_generations: *N_GENS
+  # GSPO uses sequence-level GRPO advantage estimator
+  adv_estimator: grpo_seq
   
-  # Required by base trainer (not used by ADPO)
+  # Required by base trainer
   gamma: 1.0
   lam: 1.0
   
-  # ADPO does not use KL penalty
+  # GSPO does not use KL penalty in reward (usually)
   use_kl_in_reward: False
   kl_ctrl:
     type: fixed
     kl_coef: 0.0
   
-  # ============================================================
-  # ADPO Core Hyperparameters - Softmax 变体
-  # ============================================================
-  loss_variant: softmax            # 使用 softmax 损失
-  tau: 0.5                          # softmax 温度参数
-  beta_reward: 0.3                  # q_target 温度
-  clip_anchored_score: 10.0
-  clip_log_ratio: 5.0
-  use_length_normalization: True
-  grad_scale_factor: 20.0
-  logit_reg_coef: 0.01              # Z-Loss 系数
-  use_q_center: True                # Q-加权中心化
-  
-  # Plackett-Luce 稳定性参数 (替代 Poly-Loss)
-  pl_label_smoothing: 0.1           # 软化排序目标 (推荐 0.1)
-  pl_top_k: 0                       # 0=全部
-  pl_temperature: 1.0               # >1 更平滑
-  use_poly_loss: False
-  # Softmax 变体参数 (u = ℓ - A·ℓ_ref - B·q)
-  softmax_coef_A: 1.0
-  softmax_coef_B: 0.5
-  
-  # ============================================================
-  # 自适应温度策略
-  # ============================================================
-  use_adaptive_tau: True
-  adaptive_tau_alpha: 0.2
-  adaptive_tau_beta: 0.5
-  adaptive_tau_min: 0.2
-  adaptive_tau_max: 1.5
-  vocab_size: 151936                # Qwen3 vocab size
-  
-  # 梯度稳定化
-  grad_clip_value: 0.0
-  
-  # Advantage Estimation
-  scale_rewards: True               # softmax 建议开启
-  drop_all_failed_prompts: False
-  
   # Gradient Accumulation
-  global_batch_size: 64
+  global_batch_size: 64             # Match ADPO
 
 # Trainer configuration
 trainer:
   total_epochs: 2
   project_name: ADPO-pk-GRPO
-  experiment_name: qwen3-1.7b-adpo-softmax-2a100
+  experiment_name: qwen3-1.7b-gspo-2a100
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 2                # 2x A100
@@ -170,13 +138,13 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: true
-  hub_model_id: wzx111/Qwen3-1.7B-ADPO-softmax-math
+  hub_model_id: wzx111/Qwen3-1.7B-GSPO-math
   hub_private: true
   hub_final_upload: true
   hub_push_each_epoch: true
-  hub_commit_message: "VERL ADPO softmax checkpoint"
+  hub_commit_message: "VERL GSPO checkpoint"
 
-# Custom reward function
+# Custom reward function (Same as ADPO)
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy
@@ -189,7 +157,7 @@ custom_reward_function:
     repetition_threshold: 0.3
     repetition_threshold_penalty: -0.5
 
-# Reward model configuration (disabled for ADPO)
+# Reward model configuration
 reward_model:
   enable: False
 
@@ -197,11 +165,10 @@ reward_model:
 wandb_config:
   project: ADPO-pk-GRPO
   entity: null
-  name: qwen3-1.7b-adpo-softmax-2a100
-  group: qwen3_adpo
+  name: qwen3-1.7b-gspo-2a100
+  group: qwen3_gspo
   tags:
-    - adpo
-    - softmax
+    - gspo
     - qwen3
     - math
     - a100

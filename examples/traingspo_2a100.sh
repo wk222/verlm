@@ -1,17 +1,18 @@
 #!/bin/bash
-# ADPO Training - Qwen3-1.7B on WZX MATH Dataset
-# Optimized for 2x A100 (80GB VRAM each) with Softmax loss
+# GSPO Training - Qwen3-1.7B on WZX MATH Dataset
+# Optimized for 2x A100 (80GB VRAM each)
+# Fair comparison with ADPO
 
 set -e  # Exit on error
 
 echo "=========================================="
-echo "ADPO Training - Qwen3 on WZX MATH (2x A100 80GB)"
-echo "Loss Variant: Softmax"
+echo "GSPO Training - Qwen3 on WZX MATH (2x A100 80GB)"
+echo "Algorithm: GSPO (GRPO + Sequence-level)"
 echo "=========================================="
 echo ""
 
 # Check if we're in the verlm directory
-if [ ! -d "verl/trainer/adpo" ]; then
+if [ ! -d "verl/trainer" ]; then
     echo "❌ Error: Please run this script from the verlm/ directory."
     echo "   Current directory: $(pwd)"
     exit 1
@@ -20,10 +21,11 @@ fi
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 export CUDA_VISIBLE_DEVICES=0,1  # 2 GPUs
+export VLLM_ATTENTION_BACKEND=XFORMERS
 
 # Configuration
-CONFIG_NAME="adpo_qwen3_math_2a100"
-OUTPUT_DIR="data/Qwen3-1.7B-ADPO-Softmax-2A100"
+CONFIG_NAME="gspo_qwen3_math_2a100"
+OUTPUT_DIR="data/Qwen3-1.7B-GSPO-2A100"
 DATA_DIR="data/math_wzx"
 N_GPUS=2
 
@@ -32,7 +34,6 @@ echo "  - Config: ${CONFIG_NAME}"
 echo "  - Output: ${OUTPUT_DIR}"
 echo "  - Data: ${DATA_DIR}"
 echo "  - GPUs: ${CUDA_VISIBLE_DEVICES} (${N_GPUS} GPUs)"
-echo "  - Loss: Softmax (Poly-Loss enabled)"
 echo ""
 
 # Download and preprocess WZX MATH dataset if not exists
@@ -46,20 +47,19 @@ else
     echo ""
 fi
 
-# Run ADPO training
-echo "🚀 Starting ADPO training with Softmax loss..."
+# Run GSPO training
+echo "🚀 Starting GSPO training..."
 echo ""
 
 # ============================================================
-# 2x A100 80GB 配置说明
+# 2x A100 80GB 配置说明 (与 ADPO 对齐)
 # ============================================================
-# - 使用 Softmax 损失变体 (原始 ADPO)
-# - Poly-Loss 默认开启，增强训练信号
-# - A100 80GB 显存充足，可以用更大的 batch size
-# - 不需要 micro batch，直接处理完整 mini batch
+# - 使用 GSPO (GRPO_SEQ)
+# - Batch Size = 64 (Global)
+# - N = 16 (Generations)
 # ============================================================
 
-python -m verl.trainer.main_adpo \
+python -m verl.trainer.main_ppo \
     --config-name ${CONFIG_NAME} \
     data.train_files=${DATA_DIR}/train.parquet \
     data.val_files=${DATA_DIR}/train.parquet \
@@ -85,12 +85,12 @@ python -m verl.trainer.main_adpo \
     trainer.n_gpus_per_node=${N_GPUS} \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.project_name="ADPO-pk-GRPO" \
-    trainer.experiment_name=qwen3-1.7b-adpo-softmax-2a100 \
+    trainer.experiment_name=qwen3-1.7b-gspo-2a100 \
     wandb_config.project="ADPO-pk-GRPO" \
-    wandb_config.name=qwen3-1.7b-adpo-softmax-2a100 \
+    wandb_config.name=qwen3-1.7b-gspo-2a100 \
     "$@"  # Pass any additional arguments
 
 echo ""
 echo "=========================================="
-echo "✅ ADPO Training Complete!"
+echo "✅ GSPO Training Complete!"
 echo "=========================================="
