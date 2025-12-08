@@ -117,9 +117,21 @@ algorithm:
   clip_log_ratio: 5.0             # log_ratio裁剪
   use_length_normalization: True  # 长度归一化
   grad_scale_factor: 20.0         # scaled变体使用
-  plackett_luce_top_k: 6          # [优化] 使用全量 Top-6 (等于 num_generations)
   logit_reg_coef: 0.01            # Z-Loss 系数，防止 Logits 爆炸 (建议 0.001~0.01)
   use_q_center: True              # Q-加权中心化，消除平移不变性 (建议开启)
+  
+  # Plackett-Luce 稳定性参数
+  pl_top_k: 6                     # [优化] 使用全量 Top-6 (等于 num_generations)
+  pl_temperature: 1.0             # >1 使分布更平滑
+  pl_label_smoothing: 0.1         # 软化排序目标 (推荐 0.1)
+  
+  # Poly-Loss (仅对 Plackett-Luce 生效)
+  use_poly_loss: True
+  poly_epsilon: 1.0
+  
+  # Softmax 变体参数 (u = ℓ - A·ℓ_ref - B·q)
+  softmax_coef_A: 1.0
+  softmax_coef_B: 0.5
   
   # ============================================================
   # 自适应温度策略
