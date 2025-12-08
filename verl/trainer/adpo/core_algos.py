@@ -22,6 +22,47 @@ from omegaconf import DictConfig
 from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
 
 
+def _scatter_group_mean_std(values: torch.Tensor, index: torch.Tensor, return_std: bool = False):
+    """
+    Compute mean and std of values grouped by index.
+    Returns tensors of same shape as values, broadcasted back to original indices.
+    """
+    # Ensure index is LongTensor
+    index = index.long()
+    num_groups = index.max().item() + 1
+    
+    # Compute sum and count
+    # We use a flattened view for simpler index_add if values has extra dims
+    # But here values is usually (B,)
+    
+    out_sum = torch.zeros(num_groups, device=values.device, dtype=values.dtype)
+    out_count = torch.zeros(num_groups, device=values.device, dtype=values.dtype)
+    
+    out_sum.index_add_(0, index, values)
+    out_count.index_add_(0, index, torch.ones_like(values))
+    
+    # Avoid division by zero
+    out_count = out_count.clamp(min=1.0)
+    group_mean = out_sum / out_count
+    
+    broadcast_mean = group_mean[index]
+    
+    if not return_std:
+        return broadcast_mean, None
+        
+    # Compute std
+    out_sq_sum = torch.zeros(num_groups, device=values.device, dtype=values.dtype)
+    out_sq_sum.index_add_(0, index, values.pow(2))
+    
+    group_sq_mean = out_sq_sum / out_count
+    group_var = group_sq_mean - group_mean.pow(2)
+    group_std = group_var.clamp(min=1e-10).sqrt()
+    
+    broadcast_std = group_std[index]
+    
+    return broadcast_mean, broadcast_std
+
+
 @register_adv_est("adpo")
 def compute_adpo_advantages(
     token_level_rewards: torch.Tensor,
@@ -31,11 +72,9 @@ def compute_adpo_advantages(
     **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    计算ADPO advantages（序列级别，返回 (B,) 维度）
+    Compute ADPO advantages (Sequence Level, returns (B,) dim)
     
-    支持两种模式：
-    1. Reshape Mode: batch_size 是 num_generations 的整数倍时使用，高效
-    2. Index Mode: 使用 index 分组，支持任意 batch_size
+    Fully vectorized implementation supporting arbitrary batch sizes.
     """
     with torch.no_grad():
         sequence_rewards = (token_level_rewards * response_mask).sum(dim=-1)  # (B,)
@@ -45,60 +84,26 @@ def compute_adpo_advantages(
         num_generations = config.get("num_generations", 8) if config else 8
         scale_rewards = config.get("scale_rewards", True) if config else True
         
-        # 判断是否可以使用 Reshape 模式
-        num_prompts = batch_size // num_generations
-        can_use_reshape = (num_prompts > 0) and (batch_size == num_prompts * num_generations)
-        
-        if can_use_reshape:
-            # ============================================================
-            # Reshape 模式：高效向量化
-            # ============================================================
-            rewards_reshaped = sequence_rewards.view(num_prompts, num_generations)
-            mean_rewards = rewards_reshaped.mean(dim=-1, keepdim=True)
+        # Convert index to tensor if present
+        if index is not None:
+            if isinstance(index, np.ndarray):
+                index_tensor = torch.from_numpy(index).to(device).long()
+            else:
+                index_tensor = index.to(device).long()
+                
+            # Vectorized Group Mean/Std
+            mean_rewards, std_rewards = _scatter_group_mean_std(sequence_rewards, index_tensor, return_std=scale_rewards)
             
             if scale_rewards:
-                std_rewards = rewards_reshaped.std(dim=-1, keepdim=True)
+                # std_rewards is already broadcasted to (B,)
                 std_rewards = torch.where(std_rewards < 1e-8, torch.ones_like(std_rewards), std_rewards)
-                advantages_reshaped = (rewards_reshaped - mean_rewards) / std_rewards
+                advantages = (sequence_rewards - mean_rewards) / std_rewards
             else:
-                advantages_reshaped = rewards_reshaped - mean_rewards
-            
-            advantages = advantages_reshaped.view(-1)
-            
-        elif index is not None:
-            # ============================================================
-            # Index 模式：支持任意 batch_size
-            # ============================================================
-            from collections import defaultdict
-            id2indices = defaultdict(list)
-            for i in range(batch_size):
-                id2indices[index[i]].append(i)
-            
-            advantages = torch.zeros_like(sequence_rewards)
-            
-            for idx, indices in id2indices.items():
-                indices_tensor = torch.tensor(indices, device=device, dtype=torch.long)
-                group_rewards = sequence_rewards[indices_tensor]
-                group_mean = group_rewards.mean()
+                advantages = sequence_rewards - mean_rewards
                 
-                if scale_rewards:
-                    group_std = group_rewards.std()
-                    group_std = group_std if group_std > 1e-8 else torch.tensor(1.0, device=device)
-                    group_adv = (group_rewards - group_mean) / group_std
-                else:
-                    group_adv = group_rewards - group_mean
-                
-                advantages[indices_tensor] = group_adv
         else:
-            # ============================================================
-            # Fallback：无 index 且 batch_size 不对齐
-            # 使用全局均值（可能不正确，但保留梯度）
-            # ============================================================
-            import warnings
-            warnings.warn(
-                f"ADPO advantage: batch_size={batch_size} is not divisible by num_generations={num_generations}, "
-                f"and no index provided. Falling back to global mean (may be incorrect)."
-            )
+            # Fallback: Global Mean/Std (if no index provided)
+            # This is efficient but conceptually treats the whole batch as one group
             mean_reward = sequence_rewards.mean()
             if scale_rewards:
                 std_reward = sequence_rewards.std()
@@ -353,255 +358,154 @@ def adpo_policy_loss(
         anchored_scores = torch.clamp(anchored_scores, -clip_anchored_score, clip_anchored_score)
     
     # ============================================================
-    # Step 4: 分组处理 - 支持 micro_batch_size < num_generations
+    # Step 4: Prepare Grouped Tensors (Sort & Reshape)
     # ============================================================
-    batch_size = anchored_scores.shape[0]
+    # 统一处理：无论 Index Mode 还是 Reshape Mode，都整理为 (P, G) 形状
+    # 这比 scatter 操作更高效，且支持所有 Loss 变体
     
-    # 获取预计算的 q_target 和 index（从 kwargs，由 trainer 传入）
-    q_target_precomputed = kwargs.get("q_target", None)
+    batch_size = anchored_scores.shape[0]
+    if batch_size % num_generations != 0:
+        raise ValueError(f"ADPO requires batch_size divisible by num_generations. Got {batch_size}, {num_generations}")
+    
+    num_prompts = batch_size // num_generations
     index = kwargs.get("index", None)
     
-    # 判断是否可以使用高效的 reshape 模式
-    can_use_reshape = (batch_size % num_generations == 0) and (batch_size >= num_generations)
-    
-    if can_use_reshape:
-        # 高效路径：直接 reshape
-        num_prompts = batch_size // num_generations
-        G = num_generations
+    if index is not None:
+        # Index Mode: Sort by index to group elements physically
+        if isinstance(index, np.ndarray):
+            index_tensor = torch.from_numpy(index).to(anchored_scores.device).long()
+        else:
+            index_tensor = index.to(anchored_scores.device).long()
+            
+        sorted_idx = torch.argsort(index_tensor)
         
-        u = anchored_scores.view(num_prompts, G)  # (P, G)
-        adv = advantages.view(num_prompts, G)     # (P, G)
-        q = F.softmax(adv / beta_reward, dim=-1)  # (P, G)
+        # Reorder inputs to be contiguous groups
+        u_grouped = anchored_scores[sorted_idx].view(num_prompts, num_generations)
+        adv_grouped = advantages[sorted_idx].view(num_prompts, num_generations)
         
-        use_index_mode = False
-    else:
-        # Index-based 模式：支持 micro_batch < num_generations
-        # 使用预计算的 q_target（如果有）
+        # 如果有 precomputed q，也需要排序
+        q_target_precomputed = kwargs.get("q_target", None)
         if q_target_precomputed is not None:
-            q_flat = q_target_precomputed
+            q_grouped = q_target_precomputed[sorted_idx].view(num_prompts, num_generations)
         else:
-            # Fallback: 需要按组计算 softmax，但没有 index 时只能用整体 softmax
-            # 这在实际使用中应该避免（应该总是传入 q_target 或 index）
-            q_flat = F.softmax(advantages / beta_reward, dim=-1)
-        
-        u_flat = anchored_scores
-        adv_flat = advantages
-        
-        use_index_mode = True
-        G = num_generations  # 仍然需要这个参数
-    
-    # ============================================================
-    # Step 5: 计算loss
-    # ============================================================
-    # 用于详细 logging
-    term_alignment = 0.0
-    term_logsumexp = 0.0
-    u_center_val = 0.0
-    
-    if not use_index_mode:
-        # ============================================================
-        # Reshape 模式：(P, G) 张量，高效向量化
-        # ============================================================
-        if loss_variant == "plackett_luce":
-            loss = _compute_plackett_luce_loss(
-                u, adv, 
-                use_poly_loss=use_poly_loss, 
-                epsilon=poly_epsilon,
-                top_k=pl_top_k,
-                temperature=pl_temperature,
-                label_smoothing=pl_label_smoothing,
-            )
+            q_grouped = None
             
-        elif loss_variant == "direct":
-            # Q-Weighted Centering: 消除平移不变性
-            if use_q_center:
-                u_center = (q.detach() * u).sum(dim=-1, keepdim=True)  # (P, 1)
-                u_centered = u - u_center  # (P, G)
-            else:
-                u_centered = u
-                u_center = torch.zeros(1, device=u.device)
-            
-            # 计算 Direct Loss (使用 centered logits)
-            weighted_u = (q.detach() * u_centered).sum(dim=-1)
-            logsumexp_u = torch.logsumexp(u_centered, dim=-1)
-            loss = (-weighted_u + logsumexp_u).mean()
-            
-            # 记录分项
-            term_alignment = weighted_u.mean().detach()
-            term_logsumexp = logsumexp_u.mean().detach()
-            u_center_val = u_center.mean().detach()
-            
-        elif loss_variant == "softmax":
-            # 新公式: u = ℓ - A·ℓ_ref - B·q
-            seq_old_log_prob_reshaped = seq_old_log_prob.view(num_prompts, G)
-            
-            # u_new = u - (A-1)·ℓ_ref/τ - B·q/τ
-            # 当 A=1, B=0 时，u_new = u (标准 ADPO)
-            u_new = u - (softmax_coef_A - 1.0) * seq_old_log_prob_reshaped / effective_tau - softmax_coef_B * q.detach() / effective_tau
-            
-            log_p = F.log_softmax(u_new, dim=-1)
-            loss = -(q.detach() * log_p).sum(dim=-1).mean()
-            
-        elif loss_variant == "scaled":
-            # 同样使用新公式
-            seq_old_log_prob_reshaped = seq_old_log_prob.view(num_prompts, G)
-            u_new = u - (softmax_coef_A - 1.0) * seq_old_log_prob_reshaped / effective_tau - softmax_coef_B * q.detach() / effective_tau
-            
-            log_p = F.log_softmax(u_new, dim=-1)
-            loss = -(q.detach() * log_p).sum(dim=-1).mean() * grad_scale_factor
-            
-        else:
-            raise ValueError(f"Unknown loss_variant: {loss_variant}. Supported: plackett_luce, softmax, scaled, direct")
-        
-        # 用于 metrics
-        adv_for_metrics = adv
-        u_for_metrics = u
-        q_for_metrics = q
+        # 用于后续计算的 old_log_prob (如果需要)
+        old_log_prob_grouped = seq_old_log_prob[sorted_idx].view(num_prompts, num_generations)
         
     else:
-        # ============================================================
-        # Index 模式：支持 micro_batch < num_generations
-        # 使用 softmax 变体（原始 ADPO），因为它最稳定
-        # ============================================================
-        # 注意：在此模式下，我们使用预计算的 q_target
-        # 计算 log_softmax(u) 需要按组进行
+        # Reshape Mode: Assume already grouped
+        u_grouped = anchored_scores.view(num_prompts, num_generations)
+        adv_grouped = advantages.view(num_prompts, num_generations)
         
-        # ============================================================
-        # Compute Loss (Index Mode)
-        # ============================================================
-        # 1. 应用新公式调整 u (如果需要)
-        # u_new = u + (1-A)·ℓ_ref/τ - B·q/τ
-        # 注意: u_flat 已经是 (ℓ - ℓ_ref)/τ
+        q_target_precomputed = kwargs.get("q_target", None)
+        if q_target_precomputed is not None:
+            q_grouped = q_target_precomputed.view(num_prompts, num_generations)
+        else:
+            q_grouped = None
+            
+        old_log_prob_grouped = seq_old_log_prob.view(num_prompts, num_generations)
+
+    # ============================================================
+    # Step 5: Compute q_target (if not provided)
+    # ============================================================
+    if q_grouped is None:
+        # Dense Softmax on (P, G)
+        q_grouped = F.softmax(adv_grouped / beta_reward, dim=-1)
+
+    # ============================================================
+    # Step 6: Compute Loss (on (P, G) tensors)
+    # ============================================================
+    
+    if loss_variant == "plackett_luce":
+        # Plackett-Luce (ListMLE)
+        loss = _compute_plackett_luce_loss(
+            u_grouped, 
+            adv_grouped, 
+            use_poly_loss=use_poly_loss, 
+            epsilon=poly_epsilon,
+            top_k=pl_top_k,
+            temperature=pl_temperature,
+            label_smoothing=pl_label_smoothing,
+        )
+        
+        # Metrics
+        term_alignment = torch.tensor(0.0, device=anchored_scores.device)
+        term_logsumexp = torch.tensor(0.0, device=anchored_scores.device)
+        u_center_val = torch.tensor(0.0, device=anchored_scores.device)
+        
+    else:
+        # Softmax / Scaled / Direct
+        # Apply new formula adjustment: u_new = u - (A-1)·ℓ_ref/τ - B·q/τ
         if softmax_coef_A != 1.0 or softmax_coef_B != 0.0:
-            u_flat_for_loss = u_flat - (softmax_coef_A - 1.0) * seq_old_log_prob / effective_tau - softmax_coef_B * q_flat.detach() / effective_tau
+            u_for_loss = u_grouped - (softmax_coef_A - 1.0) * old_log_prob_grouped / effective_tau - softmax_coef_B * q_grouped.detach() / effective_tau
         else:
-            u_flat_for_loss = u_flat
+            u_for_loss = u_grouped
 
-        # 2. Q-Weighted Centering (如果开启)
-        u_flat_centered = u_flat_for_loss.clone()
-        if use_q_center and index is not None:
-            from collections import defaultdict
-            id2indices = defaultdict(list)
-            for i in range(batch_size):
-                id2indices[index[i]].append(i)
-            
-            for idx, indices in id2indices.items():
-                indices_tensor = torch.tensor(indices, device=u_flat.device, dtype=torch.long)
-                group_u = u_flat_for_loss[indices_tensor]
-                group_q = q_flat[indices_tensor]
-                group_u_center = (group_q.detach() * group_u).sum()
-                u_flat_centered[indices_tensor] = group_u - group_u_center
+        # Q-Weighted Centering
+        if use_q_center:
+            # u_center = sum(q * u, dim=-1)
+            u_center = (q_grouped.detach() * u_for_loss).sum(dim=-1, keepdim=True) # (P, 1)
+            u_centered = u_for_loss - u_center
         else:
-            u_flat_centered = u_flat_for_loss
+            u_centered = u_for_loss
+            u_center = torch.zeros_like(u_for_loss)
 
-        if index is not None:
-            # 使用 index 分组计算
-            from collections import defaultdict
-            id2indices = defaultdict(list)
-            for i in range(batch_size):
-                id2indices[index[i]].append(i)
-            
-            # 容器
-            log_p_flat = torch.zeros_like(u_flat_centered)
-            logsumexp_flat = torch.zeros_like(u_flat_centered)
-            pl_loss_list = []
-            direct_logsumexp_list = []  # 用于 Direct Loss 的 logsumexp 聚合
-            
-            for idx, indices in id2indices.items():
-                indices_tensor = torch.tensor(indices, device=u_flat_centered.device, dtype=torch.long)
-                group_u = u_flat_centered[indices_tensor]
-                
-                # Softmax / Scaled / Direct
-                group_log_p = F.log_softmax(group_u, dim=0)
-                log_p_flat[indices_tensor] = group_log_p
-                group_logsumexp = torch.logsumexp(group_u, dim=0)
-                logsumexp_flat[indices_tensor] = group_logsumexp
-                
-                # Plackett-Luce (Index Mode)
-                if loss_variant == "plackett_luce":
-                    group_adv = adv_flat[indices_tensor]
-                    # Unsqueeze to (1, K) to reuse the vectorized function
-                    pl_loss_group = _compute_plackett_luce_loss(
-                        group_u.unsqueeze(0), 
-                        group_adv.unsqueeze(0), 
-                        use_poly_loss=use_poly_loss, 
-                        epsilon=poly_epsilon,
-                        top_k=pl_top_k,
-                        temperature=pl_temperature,
-                        label_smoothing=pl_label_smoothing,
-                    )
-                    pl_loss_list.append(pl_loss_group)
-                
-                # Direct Loss: 收集每组的 logsumexp (保持 tensor 以保留梯度)
-                if loss_variant == "direct":
-                    direct_logsumexp_list.append(group_logsumexp)
-
-            # 聚合 Loss
-            if loss_variant == "plackett_luce":
-                if len(pl_loss_list) > 0:
-                    loss = torch.stack(pl_loss_list).mean()
-                else:
-                    # 没有有效的组（理论上不应该发生）
-                    loss = torch.tensor(0.0, device=u_flat_centered.device, requires_grad=True)
-            elif loss_variant in ["softmax", "scaled"]:
-                # 交叉熵 loss (支持新公式，因为 u_flat_centered 已经是调整过的)
-                loss = -(q_flat.detach() * log_p_flat).sum() / batch_size
-                if loss_variant == "scaled":
-                    loss = loss * grad_scale_factor
-            elif loss_variant == "direct":
-                 # Direct Loss: -q*u + logsumexp
-                 weighted_u = (q_flat.detach() * u_flat_centered).sum() / batch_size
-                 # logsumexp 按组平均（每组贡献一个 logsumexp，保持梯度）
-                 if len(direct_logsumexp_list) > 0:
-                     mean_logsumexp = torch.stack(direct_logsumexp_list).mean()
-                 else:
-                     mean_logsumexp = torch.tensor(0.0, device=u_flat_centered.device)
-                 loss = -weighted_u + mean_logsumexp
-            else:
-                raise ValueError(f"Unknown loss_variant in Index Mode: {loss_variant}. Supported: plackett_luce, softmax, scaled, direct")
-                 
-        else:
-            # 没有 index，fallback 到整体 softmax（可能不正确但有梯度）
-            # ...existing code...
-            log_p_flat = F.log_softmax(u_flat_centered, dim=0)
-            logsumexp_flat = torch.logsumexp(u_flat_centered, dim=0).expand_as(u_flat_centered)
-            loss = -(q_flat.detach() * log_p_flat).mean()
-            if loss_variant == "scaled":
-                loss = loss * grad_scale_factor
+        # Loss Calculation: L = -sum(q * u) + logsumexp(u)
+        # Note: logsumexp(u) is computed per group
         
-        # 记录分项 (Index Mode)
-        term_logsumexp = logsumexp_flat.mean().detach()
-        # alignment term: (q * u).mean() * G 近似
-        term_alignment = (q_flat.detach() * u_flat_centered).mean().detach() * G
-        u_center_val = (u_flat - u_flat_centered).mean().detach() if use_q_center else torch.tensor(0.0)
+        if loss_variant == "direct":
+            # Direct: -q*u + logsumexp(u)
+            # This matches the decoupled estimator expectation E[-q*u + exp(u)/G] but exact
+            log_Z = torch.logsumexp(u_centered, dim=-1) # (P,)
+            loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
+            loss = loss_per_prompt.mean()
+            
+        else: # softmax or scaled
+            # Standard ADPO/DPO-like: -q * log_softmax(u)
+            # log_softmax(u) = u - logsumexp(u)
+            # -q * (u - logZ) = -q*u + q*logZ = -q*u + logZ (since sum(q)=1)
+            # So it is mathematically identical to "direct"
+            
+            # However, we can use CrossEntropy if we view q as soft labels
+            # loss = torch.sum(-q * F.log_softmax(u_centered, dim=-1), dim=-1).mean()
+            
+            # Let's stick to the explicit form for clarity
+            log_Z = torch.logsumexp(u_centered, dim=-1)
+            loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
+            loss = loss_per_prompt.mean()
         
-        # 用于 metrics
-        adv_for_metrics = adv_flat
-        u_for_metrics = u_flat
-        q_for_metrics = q_flat
+        if loss_variant == "scaled":
+            loss = loss * grad_scale_factor
+
+        # Metrics
+        term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+        term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations # approx Z/G
+        u_center_val = u_center.mean().detach()
     
     # ============================================================
-    # Step 6: 梯度裁剪（通过loss缩放）- 避免条件分支
+    # Step 7: 梯度裁剪 & Logit Reg
     # ============================================================
-    # 注意：不使用条件分支，因为loss值在不同rank上可能不同
-    # 改为始终计算缩放因子，但当不需要裁剪时scale=1
     if grad_clip_value > 0:
         with torch.no_grad():
-            # 使用max确保scale >= 1，这样不需要裁剪时不会改变loss
             scale = torch.clamp(loss.abs() / grad_clip_value, min=1.0)
         loss = loss / scale
     
-    # ============================================================
-    # Step 7: Logit Regularization (Z-Loss)
-    # ============================================================
-    # L_z = coef * (log Z)^2
-    # 这能有效防止 Logits 整体漂移到无穷大
-    logit_reg_loss = 0.0
     if logit_reg_coef > 0:
-        # 使用 term_logsumexp (即 mean(logsumexp(u)))
-        # 注意：这里我们惩罚的是 log Z 的平方
-        logit_reg_loss = logit_reg_coef * (term_logsumexp ** 2)
+        # L_z = coef * (log Z)^2
+        # We re-compute log_Z mean if not available (e.g. PL mode doesn't compute it by default)
+        if loss_variant == "plackett_luce":
+             # For PL, u_grouped is not centered, so logsumexp might be large
+             # We compute it just for regularization
+             lz = torch.logsumexp(u_grouped, dim=-1).mean()
+             logit_reg_loss = logit_reg_coef * (lz ** 2)
+        else:
+             # For Softmax, we have log_Z (per prompt)
+             logit_reg_loss = logit_reg_coef * (log_Z.mean() ** 2)
+             
         loss = loss + logit_reg_loss
+    else:
+        logit_reg_loss = torch.tensor(0.0, device=loss.device)
     
     # ============================================================
     # Metrics
@@ -609,24 +513,15 @@ def adpo_policy_loss(
     with torch.no_grad():
         kl_val = log_ratio.abs().mean().item()
         
-        # 诊断指标
-        if loss_variant == "softmax" and not use_index_mode:
-            p = F.softmax(u_for_metrics, dim=-1)
-            p_minus_q_std = (p - q_for_metrics).std().item()
-        else:
-            p_minus_q_std = 0.0
-        
         metrics = {
             "actor/ppo_kl": kl_val,
             "actor/pg_clipfrac": 0.0,
             "adpo/loss": loss.detach().item(),
-            "adpo/advantage_mean": adv_for_metrics.mean().item(),
-            "adpo/advantage_std": adv_for_metrics.std().item(),
-            "adpo/anchored_score_mean": u_for_metrics.mean().item(),
-            "adpo/anchored_score_std": u_for_metrics.std().item(),
+            "adpo/advantage_mean": advantages.mean().item(),
+            "adpo/advantage_std": advantages.std().item(),
+            "adpo/anchored_score_mean": anchored_scores.mean().item(),
+            "adpo/anchored_score_std": anchored_scores.std().item(),
             "adpo/effective_tau": float(effective_tau.item() if isinstance(effective_tau, torch.Tensor) else effective_tau),
-            "adpo/p_minus_q_std": p_minus_q_std,
-            "adpo/use_index_mode": use_index_mode,
             "adpo/term_alignment": float(term_alignment.item() if isinstance(term_alignment, torch.Tensor) else term_alignment),
             "adpo/term_logsumexp": float(term_logsumexp.item() if isinstance(term_logsumexp, torch.Tensor) else term_logsumexp),
             "adpo/logit_reg_loss": float(logit_reg_loss.item() if isinstance(logit_reg_loss, torch.Tensor) else logit_reg_loss),
