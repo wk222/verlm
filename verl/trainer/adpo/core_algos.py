@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
+from verl.utils import as_torch_index
 from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
 
 
@@ -50,13 +51,23 @@ def _scatter_group_mean_std(values: torch.Tensor, index: torch.Tensor, return_st
     if not return_std:
         return broadcast_mean, None
         
-    # Compute std
+    # Compute std with Bessel's correction (unbiased)
     out_sq_sum = torch.zeros(num_groups, device=values.device, dtype=values.dtype)
     out_sq_sum.index_add_(0, index, values.pow(2))
     
-    group_sq_mean = out_sq_sum / out_count
-    group_var = group_sq_mean - group_mean.pow(2)
+    # Var = (Sum(x^2) - (Sum x)^2 / N) / (N - 1)
+    numerator = out_sq_sum - (out_sum.pow(2) / out_count)
+    numerator = numerator.clamp(min=0.0) # Avoid negative due to precision
+    denominator = (out_count - 1.0).clamp(min=1.0)
+    group_var = numerator / denominator
+    
     group_std = group_var.clamp(min=1e-10).sqrt()
+    
+    # Handle singleton groups (count <= 1)
+    # For singletons, std is technically undefined or 0. We set it to 1.0 to avoid division by zero/tiny.
+    is_singleton = out_count <= 1.0
+    if is_singleton.any():
+        group_std = torch.where(is_singleton, torch.ones_like(group_std), group_std)
     
     broadcast_std = group_std[index]
     
@@ -86,10 +97,9 @@ def compute_adpo_advantages(
         
         # Convert index to tensor if present
         if index is not None:
-            if isinstance(index, np.ndarray):
-                index_tensor = torch.from_numpy(index).to(device).long()
-            else:
-                index_tensor = index.to(device).long()
+            # Use as_torch_index to handle various index types (int, str/uuid, etc.)
+            # and map them to contiguous range [0, G-1]
+            index_tensor = as_torch_index(index, device=device)
                 
             # Vectorized Group Mean/Std
             mean_rewards, std_rewards = _scatter_group_mean_std(sequence_rewards, index_tensor, return_std=scale_rewards)
@@ -160,19 +170,18 @@ def _compute_plackett_luce_loss(
     sorted_u = torch.gather(u_scaled, 1, sorted_indices)  # (P, G)
     
     # 完全向量化的 cumulative logsumexp（从后往前）
-    # 使用更稳定的实现
+    # 使用 torch.logcumsumexp 保证梯度正确传播
+    # 注意：旧的 cummax 实现会导致梯度消失问题！
+    #   - 在 max 位置：d(x - cummax(x))/dx = 1 - 1 = 0
+    #   - 导致 exp(...) 的输入梯度为 0
     sorted_u_flip = torch.flip(sorted_u, dims=[-1])  # (P, G) 翻转
     
-    # 数值稳定的 cumulative logsumexp
-    # 方法：逐步计算，每步都减去当前最大值
-    max_vals = sorted_u_flip.cummax(dim=-1).values  # (P, G)
-    exp_shifted = torch.exp(sorted_u_flip - max_vals)
-    cumsum_exp = torch.cumsum(exp_shifted, dim=-1)
-    # 防止 log(0)
-    cumsum_exp = torch.clamp(cumsum_exp, min=1e-10)
-    cum_logsumexp_flip = max_vals + torch.log(cumsum_exp)  # (P, G)
+    # 使用 PyTorch 原生的 logcumsumexp（梯度正确）
+    # logcumsumexp(x)[i] = log(sum(exp(x[0:i+1])))
+    cum_logsumexp_flip = torch.logcumsumexp(sorted_u_flip, dim=-1)  # (P, G)
     
     # 翻转回来得到从位置 k 开始的 logsumexp
+    # cum_logsumexp[k] = log(sum(exp(sorted_u[k:])))
     cum_logsumexp = torch.flip(cum_logsumexp_flip, dims=[-1])  # (P, G)
     
     # loss_k = -u[k] + logsumexp(u[k:])
@@ -182,14 +191,35 @@ def _compute_plackett_luce_loss(
     # Top-K: 只计算前 k 个位置
     if top_k > 0 and top_k < G - 1:
         per_position_loss = per_position_loss[:, :top_k]  # (P, top_k)
+        # Adjust G for subsequent calculations if needed, but here we just slice
     
     # Label Smoothing: 软化排序目标
     # 思想：不要求完美排序，允许一定的误差
+    # Correct implementation: L = (1-eps) * L_real + eps * L_uniform
+    # L_uniform = KL(Uniform || Model) + Entropy(Uniform)
+    # We focus on the CrossEntropy part: H(Uniform, Model) = - sum (1/N) * log p_i
+    # = - (1/N) * sum (u_i - logZ) = logZ - (1/N) * sum u_i
     if label_smoothing > 0:
-        # 对 loss 进行平滑：loss = (1 - α) * loss + α * uniform_loss
-        # uniform_loss ≈ log(G) (随机猜测的期望 loss)
-        num_positions = per_position_loss.shape[1]
-        uniform_loss = torch.log(torch.tensor(G, dtype=u.dtype, device=u.device))
+        # Calculate suffix sum of scores for uniform loss
+        # sorted_u_flip is already available
+        cumsum_u_flip = torch.cumsum(sorted_u_flip, dim=-1)
+        cumsum_u = torch.flip(cumsum_u_flip, dims=[-1]) # (P, G)
+        
+        # Number of elements in each suffix: G, G-1, ..., 1
+        suffix_counts = torch.arange(G, 0, -1, device=u.device, dtype=u.dtype) # (G,)
+        
+        # Mean score of suffix
+        suffix_mean_u = cumsum_u / suffix_counts # (P, G)
+        
+        # Uniform Loss = logZ - mean_u
+        # cum_logsumexp is logZ for each position
+        uniform_loss = cum_logsumexp - suffix_mean_u # (P, G)
+        
+        # Slice to match per_position_loss (remove last element and apply top_k)
+        uniform_loss = uniform_loss[:, :-1]
+        if top_k > 0 and top_k < G - 1:
+            uniform_loss = uniform_loss[:, :top_k]
+            
         per_position_loss = (1 - label_smoothing) * per_position_loss + label_smoothing * uniform_loss
     
     if use_poly_loss:
@@ -372,10 +402,8 @@ def adpo_policy_loss(
     
     if index is not None:
         # Index Mode: Sort by index to group elements physically
-        if isinstance(index, np.ndarray):
-            index_tensor = torch.from_numpy(index).to(anchored_scores.device).long()
-        else:
-            index_tensor = index.to(anchored_scores.device).long()
+        # Use as_torch_index to handle various index types (int, str/uuid, etc.)
+        index_tensor = as_torch_index(index, device=anchored_scores.device)
             
         sorted_idx = torch.argsort(index_tensor)
         
@@ -443,9 +471,15 @@ def adpo_policy_loss(
             u_for_loss = u_grouped
 
         # Q-Weighted Centering
+        # 注意：u_center 必须 detach！否则当 softmax(u_centered) ≈ q 时梯度消失
+        # 数学推导：
+        #   L = -(q·u_centered).sum() + logsumexp(u_centered)
+        #   如果 u_center 不 detach，u_centered = u - u_center，而 u_center = (q·u).sum()
+        #   展开后 -(q·u).sum() + (q·u).sum() = 0，alignment term 被抵消！
+        #   梯度变成 softmax(u_centered)·(I - q^T)，当 softmax ≈ q 时为 0
         if use_q_center:
             # u_center = sum(q * u, dim=-1)
-            u_center = (q_grouped.detach() * u_for_loss).sum(dim=-1, keepdim=True) # (P, 1)
+            u_center = (q_grouped.detach() * u_for_loss).sum(dim=-1, keepdim=True).detach()  # (P, 1) - MUST detach!
             u_centered = u_for_loss - u_center
         else:
             u_centered = u_for_loss
@@ -454,26 +488,14 @@ def adpo_policy_loss(
         # Loss Calculation: L = -sum(q * u) + logsumexp(u)
         # Note: logsumexp(u) is computed per group
         
-        if loss_variant == "direct":
-            # Direct: -q*u + logsumexp(u)
-            # This matches the decoupled estimator expectation E[-q*u + exp(u)/G] but exact
-            log_Z = torch.logsumexp(u_centered, dim=-1) # (P,)
-            loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
-            loss = loss_per_prompt.mean()
-            
-        else: # softmax or scaled
-            # Standard ADPO/DPO-like: -q * log_softmax(u)
-            # log_softmax(u) = u - logsumexp(u)
-            # -q * (u - logZ) = -q*u + q*logZ = -q*u + logZ (since sum(q)=1)
-            # So it is mathematically identical to "direct"
-            
-            # However, we can use CrossEntropy if we view q as soft labels
-            # loss = torch.sum(-q * F.log_softmax(u_centered, dim=-1), dim=-1).mean()
-            
-            # Let's stick to the explicit form for clarity
-            log_Z = torch.logsumexp(u_centered, dim=-1)
-            loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
-            loss = loss_per_prompt.mean()
+        # Direct / Softmax / Scaled all share the same core formula
+        # L = -q*u + logsumexp(u)
+        # This matches the decoupled estimator expectation E[-q*u + exp(u)/G] but exact
+        # Also equivalent to CrossEntropy with soft labels q
+        
+        log_Z = torch.logsumexp(u_centered, dim=-1) # (P,)
+        loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
+        loss = loss_per_prompt.mean()
         
         if loss_variant == "scaled":
             loss = loss * grad_scale_factor

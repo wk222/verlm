@@ -1,3 +1,4 @@
+
 # ADPO Training Configuration - Qwen3 on WZX MATH Dataset (2x A100 80GB)
 # Softmax loss variant with larger batch sizes
 
@@ -50,7 +51,7 @@ actor_rollout_ref:
     use_kl_loss: False
     policy_loss:
       loss_mode: adpo
-      num_generations: *N_GENS
+      num_generations: 16
     optim:
       lr: 1e-6
     fsdp_config:
@@ -66,7 +67,7 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    n: &N_GENS 16                    # 16 generations per prompt (Anchor defined here)
+    n: 16                            # 16 generations per prompt
     gpu_memory_utilization: 0.6     # A100 80GB 可以用更多显存
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
@@ -82,7 +83,7 @@ actor_rollout_ref:
 # Algorithm configuration for ADPO
 algorithm:
   adv_estimator: adpo
-  num_generations: *N_GENS
+  num_generations: 16
   
   # Required by base trainer (not used by ADPO)
   gamma: 1.0
