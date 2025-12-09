@@ -1,0 +1,225 @@
+# ADPO Training Configuration - Qwen3 on WZX MATH Dataset (4x RTX 4090, 24GB)
+# Plackett-Luce loss, 16 generations per prompt
+
+# Specify default configs from base templates
+defaults:
+  - actor@actor_rollout_ref.actor: dp_actor
+  - data@data: legacy_data
+  - rollout@actor_rollout_ref.rollout: rollout
+  - model@actor_rollout_ref.model: hf_model
+  - critic@critic: dp_critic
+  - reward_model@reward_model: dp_reward_model
+  - algorithm@algorithm.rollout_correction: rollout_correction
+  - _self_
+
+# Critic configuration (disabled for ADPO)
+critic:
+  enable: False
+
+# Data configuration (4090 24GB, keep moderate batch size)
+data:
+  train_files: $DATA_DIR/train.parquet
+  val_files: $DATA_DIR/train.parquet
+  prompt_key: prompt
+  max_prompt_length: 1024
+  max_response_length: 1280
+  train_batch_size: 32          # divisible by 16 generations -> 2 prompts per mini-batch per GPU effective
+  val_batch_size: 32
+  truncation: left
+  shuffle: true
+  dataloader_num_workers: 0
+  return_raw_input_ids: False
+  return_raw_chat: False
+
+# Actor, rollout, and reference model configuration
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: Qwen/Qwen3-1.7B
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: True
+    enable_activation_offload: False
+    use_remove_padding: True
+  actor:
+    strategy: fsdp2
+    ppo_mini_batch_size: 32       # keep small for 24GB GPUs
+    ppo_micro_batch_size: null
+    ppo_micro_batch_size_per_gpu: 4  # per-GPU micro batch; 4*4GPUs=16 samples per step
+    use_dynamic_bsz: False
+    use_kl_loss: False
+    policy_loss:
+      loss_mode: adpo
+      num_generations: 16
+    optim:
+      lr: 1e-6
+    fsdp_config:
+      wrap_policy:
+        min_num_params: 0
+      param_offload: False
+      optimizer_offload: False
+      dtype: bfloat16
+      model_dtype: bfloat16
+  rollout:
+    name: vllm
+    mode: sync
+    temperature: 1.0
+    top_k: -1
+    top_p: 1.0
+    n: 16                          # 16 generations per prompt
+    gpu_memory_utilization: 0.5    # conservative for 24GB cards
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: 8   # conservative for 24GB
+    max_num_seqs: 128              # 32 prompts *16 gens =512 total; 128 *4 GPUs =512, fits exactly
+    ignore_eos: False
+    enforce_eager: False
+    enable_chunked_prefill: True
+    enable_prefix_caching: True
+    free_cache_engine: True
+    do_sample: True
+
+# Algorithm configuration for ADPO
+algorithm:
+  adv_estimator: adpo
+  num_generations: 16
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: False
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+
+  # ============================================================
+  # ADPO Core Hyperparameters - Plackett-Luce
+  # ============================================================
+  loss_variant: plackett_luce
+  tau: 0.1                        # P-L 梯度较强，保持较低 tau 提升排序信号
+  beta_reward: 0.2                # 略尖锐的 q_target 分布
+  clip_anchored_score: 10.0
+  clip_log_ratio: 5.0
+  use_length_normalization: True
+  grad_scale_factor: 20.0
+  logit_reg_coef: 0.01
+  use_q_center: True              # 保持以消除平移不变性
+
+  # Plackett-Luce 稳定性参数
+  pl_label_smoothing: 0.1
+  pl_top_k: 8                     # 关注前半部分，削弱尾部噪声
+  pl_temperature: 1.0
+  use_poly_loss: True
+  poly_epsilon: 1.0
+
+  # Softmax 变体参数（P-L 不使用，但保留默认值）
+  softmax_coef_A: 1.0
+  softmax_coef_B: 0.0
+
+  # 自适应温度策略
+  use_adaptive_tau: True
+  adaptive_tau_alpha: 0.2
+  adaptive_tau_beta: 0.5
+  adaptive_tau_min: 0.2
+  adaptive_tau_max: 1.5
+  vocab_size: 151936
+
+  # 梯度稳定化
+  grad_clip_value: 0.0
+
+  # Advantage Estimation
+  scale_rewards: False            # P-L 通常不需要标准化 rewards
+  drop_all_failed_prompts: False
+
+  # Gradient Accumulation
+  global_batch_size: 32
+
+# Trainer configuration
+trainer:
+  total_epochs: 2
+  project_name: ADPO-P-L
+  experiment_name: qwen3-1.7b-adpo-pl16-4x4090
+  logger: ['wandb', 'console']
+  nnodes: 1
+  n_gpus_per_node: 4
+  save_freq: -1
+  save_each_epoch: true
+  test_freq: -1
+  val_before_train: False
+  seed: 42
+  default_hdfs_dir: null
+  default_local_dir: null
+  device: cuda
+  balance_batch: True
+  total_training_steps: null
+  log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
+  esi_redundant_time: 0
+  resume_mode: auto
+  resume_from_path: null
+  val_only: False
+  critic_warmup: 0
+  del_local_ckpt_after_load: False
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  ray_wait_register_center_timeout: 300
+  use_legacy_worker_impl: auto
+  bf16: True
+  fp16: False
+  push_to_hub: true
+  hub_model_id: wzx111/Qwen3-1.7B-ADPO-pl16
+  hub_private: true
+  hub_final_upload: true
+  hub_push_each_epoch: true
+  hub_commit_message: "VERL ADPO P-L checkpoint"
+
+# Custom reward function
+custom_reward_function:
+  path: verl/trainer/adpo/reward.py
+  name: good_accuracy
+  reward_kwargs:
+    ngram_size: 4
+    max_penalty: -0.5
+    penalty_scale_factor: 0.5
+    length_reward_scale: 2000.0
+    length_reward_max: 0.1
+    repetition_threshold: 0.3
+    repetition_threshold_penalty: -0.5
+
+# Reward model configuration (disabled for ADPO)
+reward_model:
+  enable: False
+
+# WandB logging configuration
+wandb_config:
+  project: ADPO-P-L
+  entity: null
+  name: qwen3-1.7b-adpo-pl16-4x4090
+  group: qwen3_adpo
+  tags:
+    - adpo
+    - plackett_luce
+    - qwen3
+    - math
+    - rtx4090
+    - 16gen
+
+# Ray distributed computing configuration
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        TOKENIZERS_PARALLELISM: "false"
+        NCCL_DEBUG: "WARN"
+        VLLM_LOGGING_LEVEL: "WARNING"
+    num_cpus: null
+  timeline_json_file: null
+
+# Transfer queue configuration
+transfer_queue:
+  enable: False
+
+# Global profiler configuration
+global_profiler:
+  tool: none
+  steps: []
+  profile_continuous_steps: false

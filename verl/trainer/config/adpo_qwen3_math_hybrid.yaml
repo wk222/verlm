@@ -44,14 +44,14 @@ actor_rollout_ref:
     use_remove_padding: True
   actor:
     strategy: fsdp2
-    ppo_mini_batch_size: 60         # [修改] 从 64 改为 60 (能被 6 整除)
+    ppo_mini_batch_size: 64         # 保持 64
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 6  # 与 GSPO 一致
+    ppo_micro_batch_size_per_gpu: 6  # 保持 6，与 num_generations 解耦
     use_dynamic_bsz: False
     use_kl_loss: False
     policy_loss:
       loss_mode: adpo
-      num_generations: 6              # [修改] 从 8 改为 6，以支持 Plackett-Luce
+      num_generations: 8              # 恢复为 8
     optim:
       lr: 1e-6
     fsdp_config:
@@ -67,12 +67,12 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    n: 6                            # [修改] 从 8 改为 6
+    n: 8                            # 恢复为 8
     gpu_memory_utilization: 0.55
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: 16
-    max_num_seqs: 192
+    max_num_seqs: 256
     ignore_eos: False
     enforce_eager: False
     enable_chunked_prefill: True
@@ -85,7 +85,7 @@ algorithm:
   adv_estimator: adpo
   
   # 统一定义 num_generations，避免命令行重复写
-  num_generations: 6                # [修改] 从 8 改为 6
+  num_generations: 8                # 恢复为 8
   
   # Required by base trainer (not used by ADPO, but needed for compatibility)
   gamma: 1.0
@@ -104,15 +104,16 @@ algorithm:
   #   "pairwise"             : DPO风格 -log σ(u_w - u_l) ⭐推荐
   #   "plackett_luce"        : P-L模型/ListMLE，完整排序对齐
   #   "plackett_luce_approx" : P-L近似版（只看top-k）
+  #   "decoupled"            : L = sum(-q*u + 1/G * exp(u)) 解耦版本
   #   "direct"               : -q·u + logsumexp(u)
   #   "infonce"              : -u_best + logsumexp(u)  
   #   "softmax"              : 原始ADPO
   #   "scaled"               : 原始ADPO × grad_scale_factor
   # ============================================================
   
-  loss_variant: plackett_luce     # [修改] 启用 Plackett-Luce，最强排序信号
-  tau: 0.1                        # [优化] P-L 梯度强，稍微调大 tau (0.05->0.1) 增加鲁棒性
-  beta_reward: 0.05               # [优化] 保持锐利，增强排序信号
+  loss_variant: softmax        # 使用 Decoupled Loss
+  tau: 0.5                        # Decoupled Loss 推荐 tau
+  beta_reward: 0.3                # Decoupled Loss 推荐 beta_reward
   clip_anchored_score: 10.0       # anchored_scores裁剪范围
   clip_log_ratio: 5.0             # log_ratio裁剪
   use_length_normalization: True  # 长度归一化
@@ -120,8 +121,8 @@ algorithm:
   logit_reg_coef: 0.01            # Z-Loss 系数，防止 Logits 爆炸 (建议 0.001~0.01)
   use_q_center: True              # Q-加权中心化，消除平移不变性 (建议开启)
   
-  # Plackett-Luce 稳定性参数
-  pl_top_k: 6                     # [优化] 使用全量 Top-6 (等于 num_generations)
+  # Plackett-Luce 稳定性参数（Decoupled Loss 不使用这些参数）
+  pl_top_k: 8                     # 更新为 num_generations=8
   pl_temperature: 1.0             # >1 使分布更平滑
   pl_label_smoothing: 0.1         # 软化排序目标 (推荐 0.1)
   
@@ -131,7 +132,7 @@ algorithm:
   
   # Softmax 变体参数 (u = ℓ - A·ℓ_ref - B·q)
   softmax_coef_A: 1.0
-  softmax_coef_B: 0.5
+  softmax_coef_B: 0.0             # [修改] Decoupled 模式建议设为 0.0，还原纯粹定义
   
   # ============================================================
   # 自适应温度策略

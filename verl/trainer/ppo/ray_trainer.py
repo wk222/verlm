@@ -270,6 +270,7 @@ def compute_advantage(
             
             index = data.non_tensor_batch["uid"]
             beta_reward = config.get("beta_reward", 0.5) if config else 0.5
+            use_delayed_softmax = config.get("use_delayed_softmax", False) if config else False
             
             # Compute softmax within groups
             batch_size = advantages.shape[0]
@@ -285,6 +286,29 @@ def compute_advantage(
                 q_target[indices_tensor] = group_softmax
             
             data.batch["q_target"] = q_target
+            
+            # ============================================================
+            # 延迟 Softmax 模式：预计算 p_target = softmax(u_group / tau)
+            # 
+            # 这里预计算的是基于 advantage 的 p_target，而不是基于 anchored_score
+            # 因为 anchored_score = log_ratio / tau 需要在 actor forward 时才能计算
+            # 
+            # 但实际上，对于 loss = -q·u + logsumexp(u) 的梯度 p - q：
+            # - q 来自 advantage（已预计算）
+            # - p 来自 softmax(u)，其中 u = anchored_score
+            # 
+            # 所以这里预计算的 p_target 实际上会在 actor loss 计算时更新
+            # 或者我们使用一个近似：当模型变化不大时，p ≈ q
+            # 
+            # 更精确的方案是在第一次 forward 后收集 u，然后重新计算 p
+            # 但这需要两次 forward，不够高效
+            # 
+            # 折中方案：使用 q 作为 p 的初始估计，加上正则化防止发散
+            # ============================================================
+            if use_delayed_softmax:
+                # 初始时 p_target = q_target（假设模型接近 old policy）
+                # 在实际训练中，可以在第一个 epoch 后用真实的 p 更新
+                data.batch["p_target"] = q_target.clone()
             
     return data
 

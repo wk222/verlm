@@ -23,6 +23,107 @@ from verl.utils import as_torch_index
 from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
 
 
+# ============================================================
+# 延迟 Softmax CE：支持跨 micro-batch 的组计算
+# ============================================================
+
+class DelayedGroupSoftmaxCE(torch.autograd.Function):
+    """
+    支持组成员分布在不同 micro-batch 的 Softmax CE Loss
+    
+    核心思想：
+    - 前向时只计算 -q·u（不需要组内完整）
+    - 梯度使用预计算的 p = softmax(u_group)
+    
+    数学：
+    - 标准 CE: L = -q·u + logsumexp(u)
+    - 梯度: ∂L/∂u = softmax(u) - q = p - q
+    
+    关键：只要我们能提供正确的 p，就能得到正确的梯度，
+          而 p 可以在所有组成员收集完后统一计算
+    """
+    
+    @staticmethod
+    def forward(ctx, u, q, p_precomputed):
+        """
+        Args:
+            u: (P, G) - 当前 batch 的 anchored scores（需要梯度）
+            q: (P, G) - 目标分布（已 detach）
+            p_precomputed: (P, G) - 预计算的 softmax(u_全组)
+        """
+        ctx.save_for_backward(p_precomputed.detach(), q.detach())
+        # 用预计算的 p 计算 CE loss（用于 logging）
+        eps = 1e-10
+        loss = -(q * torch.log(p_precomputed + eps)).sum(dim=-1).mean()
+        return loss
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        p_precomputed, q = ctx.saved_tensors
+        # 正确的梯度：p - q
+        grad_u = grad_output * (p_precomputed - q)
+        return grad_u, None, None
+
+
+def compute_group_softmax_from_rewards(
+    sequence_rewards: torch.Tensor,
+    index: np.ndarray,
+    beta_reward: float = 0.3,
+    tau: float = 0.5,
+) -> torch.Tensor:
+    """
+    根据 reward 预计算 p = softmax(advantage / tau)
+    
+    这个函数应该在 advantage 计算阶段调用，此时所有组成员的 reward 都已收集完毕
+    
+    Args:
+        sequence_rewards: (B,) 所有样本的序列奖励
+        index: (B,) 组索引
+        beta_reward: reward softmax 温度
+        tau: anchored score 温度
+        
+    Returns:
+        p_target: (B,) 每个样本的目标概率 p_i = exp(adv_i/tau) / sum_j(exp(adv_j/tau))
+    """
+    device = sequence_rewards.device
+    index_tensor = as_torch_index(index, device=device)
+    
+    # 计算组内均值
+    num_groups = index_tensor.max().item() + 1
+    group_sum = torch.zeros(num_groups, device=device, dtype=sequence_rewards.dtype)
+    group_count = torch.zeros(num_groups, device=device, dtype=sequence_rewards.dtype)
+    
+    group_sum.index_add_(0, index_tensor, sequence_rewards)
+    group_count.index_add_(0, index_tensor, torch.ones_like(sequence_rewards))
+    group_count = group_count.clamp(min=1.0)
+    group_mean = group_sum / group_count
+    
+    # 计算 advantage
+    advantages = sequence_rewards - group_mean[index_tensor]
+    
+    # 计算 p = softmax(advantage / beta_reward)
+    # 使用 scatter 实现组内 softmax
+    scaled_adv = advantages / beta_reward
+    
+    # 计算组内 logsumexp（用于归一化）
+    # 先计算组内 max（数值稳定）
+    group_max = torch.full((num_groups,), float('-inf'), device=device, dtype=sequence_rewards.dtype)
+    group_max = torch.scatter_reduce(
+        group_max, 0, index_tensor, scaled_adv, reduce='amax'
+    )
+    scaled_adv_shifted = scaled_adv - group_max[index_tensor]
+    
+    # 计算 exp 和组内 sum
+    exp_adv = torch.exp(scaled_adv_shifted)
+    group_exp_sum = torch.zeros(num_groups, device=device, dtype=sequence_rewards.dtype)
+    group_exp_sum.index_add_(0, index_tensor, exp_adv)
+    
+    # p = exp(adv - max) / sum(exp(adv - max))
+    p_target = exp_adv / group_exp_sum[index_tensor]
+    
+    return p_target
+
+
 def _scatter_group_mean_std(values: torch.Tensor, index: torch.Tensor, return_std: bool = False):
     """
     Compute mean and std of values grouped by index.
@@ -86,6 +187,9 @@ def compute_adpo_advantages(
     Compute ADPO advantages (Sequence Level, returns (B,) dim)
     
     Fully vectorized implementation supporting arbitrary batch sizes.
+    
+    当启用 use_delayed_softmax 时，还会返回预计算的 p_target，
+    通过 kwargs 中的 extra_returns dict 返回。
     """
     with torch.no_grad():
         sequence_rewards = (token_level_rewards * response_mask).sum(dim=-1)  # (B,)
@@ -94,6 +198,8 @@ def compute_adpo_advantages(
         device = sequence_rewards.device
         num_generations = config.get("num_generations", 8) if config else 8
         scale_rewards = config.get("scale_rewards", True) if config else True
+        beta_reward = config.get("beta_reward", 0.3) if config else 0.3
+        use_delayed_softmax = config.get("use_delayed_softmax", False) if config else False
         
         # Convert index to tensor if present
         if index is not None:
@@ -110,6 +216,38 @@ def compute_adpo_advantages(
                 advantages = (sequence_rewards - mean_rewards) / std_rewards
             else:
                 advantages = sequence_rewards - mean_rewards
+            
+            # ============================================================
+            # 延迟 Softmax 模式：预计算 p_target = softmax(advantage / beta)
+            # 
+            # 这里是最佳时机，因为：
+            # 1. 所有组成员的 reward 已经收集完毕
+            # 2. 可以正确计算组内 softmax
+            # 3. 后续 loss 计算时可以跨 micro-batch
+            # ============================================================
+            if use_delayed_softmax:
+                # 计算 p_target = softmax(advantage / beta_reward)，按组归一化
+                # 使用 scatter 实现组内 softmax
+                scaled_adv = advantages / beta_reward
+                
+                # 数值稳定：先减去组内 max
+                num_groups = index_tensor.max().item() + 1
+                group_max = torch.full((num_groups,), float('-inf'), device=device, dtype=sequence_rewards.dtype)
+                group_max = torch.scatter_reduce(group_max, 0, index_tensor, scaled_adv, reduce='amax')
+                scaled_adv_shifted = scaled_adv - group_max[index_tensor]
+                
+                # exp 并求组内 sum
+                exp_adv = torch.exp(scaled_adv_shifted)
+                group_exp_sum = torch.zeros(num_groups, device=device, dtype=sequence_rewards.dtype)
+                group_exp_sum.index_add_(0, index_tensor, exp_adv)
+                
+                # p = exp(adv - max) / sum(exp(adv - max))
+                p_target = exp_adv / group_exp_sum[index_tensor]
+                
+                # 通过 kwargs 返回（调用方需要处理）
+                extra_returns = kwargs.get("extra_returns", None)
+                if extra_returns is not None and isinstance(extra_returns, dict):
+                    extra_returns["p_target"] = p_target
                 
         else:
             # Fallback: Global Mean/Std (if no index provided)
@@ -121,6 +259,13 @@ def compute_adpo_advantages(
                 advantages = (sequence_rewards - mean_reward) / std_reward
             else:
                 advantages = sequence_rewards - mean_reward
+            
+            # 全局模式下也支持 p_target 预计算
+            if use_delayed_softmax:
+                p_target = F.softmax(advantages / beta_reward, dim=-1)
+                extra_returns = kwargs.get("extra_returns", None)
+                if extra_returns is not None and isinstance(extra_returns, dict):
+                    extra_returns["p_target"] = p_target
         
     return advantages, sequence_rewards
 
@@ -399,6 +544,7 @@ def adpo_policy_loss(
     
     num_prompts = batch_size // num_generations
     index = kwargs.get("index", None)
+    sorted_idx = None  # Not sure Initialize to avoid potential undefined variable issues
     
     if index is not None:
         # Index Mode: Sort by index to group elements physically
@@ -485,25 +631,94 @@ def adpo_policy_loss(
             u_centered = u_for_loss
             u_center = torch.zeros_like(u_for_loss)
 
-        # Loss Calculation: L = -sum(q * u) + logsumexp(u)
-        # Note: logsumexp(u) is computed per group
+        # ============================================================
+        # 延迟 Softmax CE 模式：支持跨 micro-batch 的组计算
+        # ============================================================
+        # 检查是否有预计算的 p_target（通过 kwargs 传入）
+        p_target_precomputed = kwargs.get("p_target", None)
+        use_delayed_softmax = _cfg("use_delayed_softmax", False)
         
-        # Direct / Softmax / Scaled all share the same core formula
-        # L = -q*u + logsumexp(u)
-        # This matches the decoupled estimator expectation E[-q*u + exp(u)/G] but exact
-        # Also equivalent to CrossEntropy with soft labels q
-        
-        log_Z = torch.logsumexp(u_centered, dim=-1) # (P,)
-        loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
-        loss = loss_per_prompt.mean()
-        
-        if loss_variant == "scaled":
-            loss = loss * grad_scale_factor
+        if loss_variant == "decoupled":
+            # =====================================================
+            # Decoupled Loss: L = sum(-q*u + 1/G * exp(u))
+            # = -q.u + mean(exp(u))
+            # 
+            # Gradient: -q + 1/G * exp(u)
+            # This pushes exp(u)/G towards q
+            # =====================================================
+            
+            # Term 1: -q * u
+            term1 = -(q_grouped.detach() * u_centered).sum(dim=-1)
+            
+            # Term 2: mean(exp(u))
+            term2 = torch.exp(u_centered).mean(dim=-1)
+            
+            loss_per_prompt = term1 + term2
+            loss = loss_per_prompt.mean()
+            
+            # Metrics
+            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+            term_logsumexp = term2.mean().detach()
+            u_center_val = u_center.mean().detach()
+            
+            # For logging/reg purposes, compute logsumexp
+            log_Z = torch.logsumexp(u_centered, dim=-1)
 
-        # Metrics
-        term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
-        term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations # approx Z/G
-        u_center_val = u_center.mean().detach()
+        elif p_target_precomputed is not None and use_delayed_softmax:
+            # =====================================================
+            # 延迟模式：使用预计算的 p_target
+            # 
+            # 优势：
+            # 1. 不需要 batch_size >= num_generations
+            # 2. 可以在 advantage 计算阶段（所有组成员已收集）预计算 p
+            # 3. 梯度仍然是正确的 (p - q)
+            # 
+            # 使用方法：
+            # 1. 在 compute_adpo_advantages 时同时计算 p_target
+            # 2. 将 p_target 存入 DataProto 并传递给 actor
+            # 3. actor 调用 loss 时传入 p_target=...
+            # =====================================================
+            
+            # 重新排序 p_target 以匹配 u_centered 的顺序
+            if index is not None:
+                p_grouped = p_target_precomputed[sorted_idx].view(num_prompts, num_generations)
+            else:
+                p_grouped = p_target_precomputed.view(num_prompts, num_generations)
+            
+            # 使用自定义 autograd function
+            loss = DelayedGroupSoftmaxCE.apply(u_centered, q_grouped.detach(), p_grouped)
+            
+            if loss_variant == "scaled":
+                loss = loss * grad_scale_factor
+            
+            # Metrics（使用预计算的 p）
+            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+            # p_grouped 已经是 softmax，所以 log_Z ≈ log(sum(exp(u)))
+            with torch.no_grad():
+                log_Z_approx = torch.logsumexp(u_centered.detach(), dim=-1)
+                term_logsumexp = torch.exp(log_Z_approx).mean() / num_generations
+            u_center_val = u_center.mean().detach()
+            log_Z = log_Z_approx  # 用于后续的正则化
+            
+        else:
+            # =====================================================
+            # 标准模式：实时计算 logsumexp（需要组内完整）
+            # 
+            # Loss Calculation: L = -sum(q * u) + logsumexp(u)
+            # 梯度: ∂L/∂u = softmax(u) - q = p - q
+            # =====================================================
+            
+            log_Z = torch.logsumexp(u_centered, dim=-1)  # (P,)
+            loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
+            loss = loss_per_prompt.mean()
+            
+            if loss_variant == "scaled":
+                loss = loss * grad_scale_factor
+
+            # Metrics
+            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+            term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations  # approx Z/G
+            u_center_val = u_center.mean().detach()
     
     # ============================================================
     # Step 7: 梯度裁剪 & Logit Reg
