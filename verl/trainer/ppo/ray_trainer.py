@@ -889,7 +889,7 @@ class RayPPOTrainer:
             f.write(str(self.global_steps))
 
     def _push_to_hub(self, commit_message: str = None, is_final: bool = False):
-        """Upload actor checkpoint (+ tokenizer) to HuggingFace Hub.
+        """Upload actor checkpoint (+ tokenizer) to HuggingFace Hub in background.
 
         Expected config fields under trainer:
           push_to_hub: bool
@@ -905,45 +905,81 @@ class RayPPOTrainer:
         if not isinstance(repo_id, str) or repo_id.strip() == "":
             print("[Hub] hub_model_id 未设置，跳过上传。")
             return
+        
+        # Check if huggingface_hub is available
         try:
-            from huggingface_hub import HfApi
-        except Exception as e:
-            print(f"[Hub] 导入 huggingface_hub 失败: {e}. 请先安装 huggingface_hub。")
+            import huggingface_hub
+        except ImportError:
+            print("[Hub] 导入 huggingface_hub 失败。请先安装 huggingface_hub。")
             return
-        api = HfApi()
-        token = os.environ.get("HUGGINGFACE_HUB_TOKEN", None)
-        private = bool(self.config.trainer.get("hub_private", True))
-        if commit_message is None:
-            commit_message = self.config.trainer.get("hub_commit_message", "VERL checkpoint")
-        # Ensure repo exists
-        try:
-            api.create_repo(repo_id=repo_id, private=private, exist_ok=True, token=token)
-        except Exception as e:
-            print(f"[Hub] 创建/确认仓库失败: {e}")
+
         ckpt_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
         actor_folder = os.path.join(ckpt_folder, "actor")
         if not os.path.isdir(actor_folder):
             print(f"[Hub] 未找到 actor 目录: {actor_folder}, 跳过上传。")
             return
+
+        # Prepare for upload
+        token = os.environ.get("HUGGINGFACE_HUB_TOKEN", None)
+        private = bool(self.config.trainer.get("hub_private", True))
+        if commit_message is None:
+            commit_message = self.config.trainer.get("hub_commit_message", "VERL checkpoint")
+
         # Copy tokenizer files into actor folder if not present
         self._copy_tokenizer_to_folder(actor_folder)
+        
         # Write model card
         try:
             self._write_model_card(actor_folder)
         except Exception as e:
             print(f"[Hub] 写入模型卡失败: {e}")
-        print(f"[Hub] 上传目录 {actor_folder} 到仓库 {repo_id} (step={self.global_steps}, final={is_final})")
-        try:
-            api.upload_folder(
-                folder_path=actor_folder,
-                path_in_repo="",
-                repo_id=repo_id,
-                token=token,
-                commit_message=commit_message,
-            )
-            print("[Hub] 上传完成。")
-        except Exception as e:
-            print(f"[Hub] 上传失败: {e}")
+
+        # Define upload function to run in background
+        def _upload_task(folder, repo, token, msg, private):
+            try:
+                from huggingface_hub import HfApi
+                api = HfApi()
+                # Ensure repo exists
+                api.create_repo(repo_id=repo, private=private, exist_ok=True, token=token)
+                
+                print(f"[Hub] 后台上传开始: {folder} -> {repo}")
+                
+                # Filter patterns: allow model weights, config, tokenizer
+                # Exclude optimizer states and other large training artifacts
+                allow_patterns = [
+                    "*.json", "*.txt", "*.md",  # Configs, tokenizer info, README
+                    "*.safetensors", "*.bin",   # Model weights
+                    "*.model",                  # Tokenizer model
+                    "*.py"                      # Model code if trust_remote_code
+                ]
+                ignore_patterns = [
+                    "optimizer.pt", "scheduler.pt", "rng_state.pth", # Optimizer states
+                    "*.optimizer", "*.pth", # General torch states
+                    "global_step*", # recursive check
+                ]
+                
+                api.upload_folder(
+                    folder_path=folder,
+                    path_in_repo="",
+                    repo_id=repo,
+                    token=token,
+                    commit_message=msg,
+                    allow_patterns=allow_patterns,
+                    ignore_patterns=ignore_patterns,
+                )
+                print(f"[Hub] 后台上传完成: {repo} (step={self.global_steps})")
+            except Exception as e:
+                print(f"[Hub] 后台上传失败: {e}")
+
+        # Start background thread
+        import threading
+        upload_thread = threading.Thread(
+            target=_upload_task,
+            args=(actor_folder, repo_id, token, commit_message, private),
+            daemon=True # Daemon thread will not block program exit
+        )
+        upload_thread.start()
+        print(f"[Hub] 已启动后台上传任务 (step={self.global_steps})")
 
     def _push_final_to_hub(self):
         """Backward compatible wrapper for final push."""

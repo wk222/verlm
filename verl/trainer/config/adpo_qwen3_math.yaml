@@ -16,7 +16,8 @@ actor_rollout_ref:
     strategy: fsdp
     
     # Batch size configuration (reduced for memory efficiency)
-    ppo_micro_batch_size_per_gpu: 4
+    ppo_mini_batch_size: 60  # Must be divisible by ppo_micro_batch_size_per_gpu
+    ppo_micro_batch_size_per_gpu: 6
     
     # FSDP configuration
     fsdp_config:

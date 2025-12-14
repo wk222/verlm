@@ -24,6 +24,7 @@ train_max_samples: -1
 val_max_samples: -1
 
 # The field in the dataset where the prompt is located. Default is 'prompt'.
+# For MATH dataset, use 'prompt' instead
 prompt_key: prompt
 
 # The field used to select the reward function (if using different ones per example).

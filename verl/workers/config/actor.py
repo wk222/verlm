@@ -36,21 +36,89 @@ class PolicyLossConfig(BaseConfig):
 
     Args:
         loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg', 'adpo', 'gspo'.
+        loss_variant (str): Variant of the loss (e.g. 'plackett_luce', 'softmax', 'decoupled' for ADPO).
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
         num_generations (int): Number of generations per prompt (for ADPO/GRPO-style algorithms).
+        use_precomputed_q (bool): Whether to use precomputed Q values (for ADPO flexible batching).
+        
+        # ADPO Specifics
+        tau (float): Temperature for anchored scores.
+        beta_reward (float): Temperature for reward softmax (q computation).
+        clip_anchored_score (float): Clipping range for anchored scores.
+        clip_log_ratio (float): Clipping range for log ratio.
+        use_length_normalization (bool): Whether to normalize by length.
+        grad_scale_factor (float): Gradient scaling factor.
+        logit_reg_coef (float): Logit regularization coefficient.
+        use_q_center (bool): Whether to center Q-weighted scores.
+        use_adaptive_tau (bool): Whether to use adaptive temperature.
+        adaptive_tau_alpha (float): Alpha parameter for adaptive tau.
+        adaptive_tau_beta (float): Beta parameter for adaptive tau.
+        adaptive_tau_min (float): Minimum tau.
+        adaptive_tau_max (float): Maximum tau.
+        vocab_size (int): Vocab size for entropy normalization.
+        grad_clip_value (float): Gradient clipping value at loss level.
+        softmax_coef_A (float): Coefficient A for Softmax loss variant.
+        softmax_coef_B (float): Coefficient B for Softmax loss variant.
+        
+        # Plackett-Luce Specifics
+        pl_top_k (int): Top-K for PL ranking.
+        pl_temperature (float): Temperature for PL scores.
+        pl_label_smoothing (float): Label smoothing for PL.
+        use_poly_loss (bool): Whether to use Poly-Loss.
+        poly_epsilon (float): Epsilon for Poly-Loss.
+        
+        # Decoupled Specifics
+        use_delayed_softmax (bool): Whether to use delayed softmax (similar to use_precomputed_q).
+        
+        # Rollout Correction
+        rollout_correction (dict): Config dict for rollout correction (if embedded here).
     """
 
     loss_mode: str = "vanilla"
+    loss_variant: str = "softmax"  # Default variant
     clip_cov_ratio: float = 0.0002
     clip_cov_lb: float = 1.0
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
     num_generations: int = 8  # For ADPO: number of generations per prompt
+    use_precomputed_q: bool = False
+    
+    # ADPO Params
+    tau: float = 0.5
+    beta_reward: float = 0.3
+    clip_anchored_score: float = 10.0
+    clip_log_ratio: float = 5.0
+    use_length_normalization: bool = True
+    grad_scale_factor: float = 20.0
+    logit_reg_coef: float = 0.01
+    use_q_center: bool = True
+    use_adaptive_tau: bool = False
+    adaptive_tau_alpha: float = 0.2
+    adaptive_tau_beta: float = 0.5
+    adaptive_tau_min: float = 0.2
+    adaptive_tau_max: float = 1.5
+    vocab_size: int = 32000
+    grad_clip_value: float = 0.0
+    softmax_coef_A: float = 1.0
+    softmax_coef_B: float = 0.5
+    
+    # PL Params
+    pl_top_k: int = 0
+    pl_temperature: float = 1.0
+    pl_label_smoothing: float = 0.0
+    use_poly_loss: bool = False
+    poly_epsilon: float = 1.0
+    
+    # Decoupled
+    use_delayed_softmax: bool = False
+    
+    # Rollout correction (optional, usually Dict or None)
+    rollout_correction: Optional[Any] = None
 
 
 @dataclass

@@ -1,7 +1,6 @@
-# GSPO Training Configuration - Qwen3 on MATH Dataset (4x4090, Fair Comparison)
-# GSPO = GRPO + 句级概率 (Sentence-level Probability)
-# 参考论文: https://arxiv.org/pdf/2507.18071
-# 配置已对齐 ADPO Softmax，用于公平对比
+# ADPO Training Configuration - Qwen3 on WZX MATH Dataset (Decoupled Mode - 4 GPU)
+# Based on adpo_qwen3_math_hybrid.yaml with Decoupled-specific modifications
+# Optimized for 4x4090 (24GB VRAM each)
 
 # Specify default configs from base templates
 defaults:
@@ -14,7 +13,7 @@ defaults:
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
 
-# Critic configuration (disabled for GSPO)
+# Critic configuration (disabled for ADPO)
 critic:
   enable: False
 
@@ -45,21 +44,30 @@ actor_rollout_ref:
     use_remove_padding: True
   actor:
     strategy: fsdp2
-    ppo_mini_batch_size: 24           # 对齐 ADPO
+    ppo_mini_batch_size: 24
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 6   # 与 ADPO 相同
+    ppo_micro_batch_size_per_gpu: 6
     use_dynamic_bsz: False
     use_kl_loss: False
-    # GSPO loss: auto-detects advantages dimension for optimal computation
-    # When paired with grpo_seq (returns B,), uses efficient sequence-level path
     policy_loss:
-      loss_mode: gspo
-    # Note: loss_agg_mode is ignored by gspo (it handles aggregation internally)
-    loss_agg_mode: token-mean
-    # Clip ratio配置
-    clip_ratio: 0.2
-    clip_ratio_low: 0.2
-    clip_ratio_high: 0.28
+      loss_mode: adpo
+      num_generations: 6
+      
+      # ADPO Loss Params
+      loss_variant: decoupled
+      tau: 0.5
+      beta_reward: 0.3
+      use_length_normalization: True
+      grad_scale_factor: 20.0
+      logit_reg_coef: 0.01
+      use_q_center: True
+      use_adaptive_tau: True
+      adaptive_tau_alpha: 0.2
+      adaptive_tau_beta: 0.5
+      adaptive_tau_min: 0.2
+      adaptive_tau_max: 1.5
+      vocab_size: 151936
+      grad_clip_value: 0.0
     optim:
       lr: 1e-6
     fsdp_config:
@@ -75,12 +83,12 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    n: 6                              # 对齐 ADPO (从 8 改为 6)
+    n: 6
     gpu_memory_utilization: 0.55
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 32  # 对齐 ADPO (从 16 改为 32)
-    max_num_seqs: 256                 # 对齐 ADPO (从 192 改为 256)
+    log_prob_micro_batch_size_per_gpu: 32
+    max_num_seqs: 256
     ignore_eos: False
     enforce_eager: False
     enable_chunked_prefill: True
@@ -88,24 +96,61 @@ actor_rollout_ref:
     free_cache_engine: True
     do_sample: True
 
-# Algorithm configuration for GSPO (Optimized)
+# Algorithm configuration for ADPO
 algorithm:
-  # GSPO uses sequence-level GRPO advantage estimator (returns B, not B*T)
-  # This reduces memory by ~1000x compared to standard grpo
-  adv_estimator: grpo_seq
+  adv_estimator: adpo
   
-  # Required by base trainer
+  # Number of generations per prompt
+  num_generations: 6
+  
+  # Required by base trainer (not used by ADPO, but needed for compatibility)
   gamma: 1.0
   lam: 1.0
   
-  # GSPO does not use KL penalty
+  # ADPO does not use KL penalty (on-policy mode)
   use_kl_in_reward: False
   kl_ctrl:
     type: fixed
     kl_coef: 0.0
   
-  # GRPO advantage normalization (keep for fair comparison with GRPO)
-  norm_adv_by_std_in_grpo: True
+  # ADPO Core Hyperparameters - Decoupled Mode
+  loss_variant: decoupled
+  tau: 0.5
+  beta_reward: 0.3
+  clip_anchored_score: 10.0
+  clip_log_ratio: 5.0
+  use_length_normalization: True
+  grad_scale_factor: 20.0
+  logit_reg_coef: 0.01
+  use_q_center: True
+  
+  # Plackett-Luce parameters (not used in decoupled, but kept for compatibility)
+  pl_top_k: 6
+  pl_temperature: 1.0
+  pl_label_smoothing: 0.1
+  
+  # Poly-Loss
+  use_poly_loss: False
+  poly_epsilon: 1.0
+  
+  # Softmax variant parameters
+  softmax_coef_A: 1.0
+  softmax_coef_B: 0.0
+  
+  # Adaptive Temperature
+  use_adaptive_tau: True
+  adaptive_tau_alpha: 0.2
+  adaptive_tau_beta: 0.5
+  adaptive_tau_min: 0.2
+  adaptive_tau_max: 1.5
+  vocab_size: 151936
+  
+  # Gradient stabilization
+  grad_clip_value: 0.0
+  
+  # Advantage Estimation
+  scale_rewards: False
+  drop_all_failed_prompts: False
   
   # Gradient Accumulation
   global_batch_size: 32
@@ -114,12 +159,12 @@ algorithm:
 trainer:
   total_epochs: 4
   project_name: ADPO-GSPO-WZX
-  experiment_name: qwen3-1.7b-gspo-baseline
+  experiment_name: qwen3-1.7b-adpo-decoupled
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
   save_freq: -1
-  save_each_epoch: False
+  save_each_epoch: true
   test_freq: -1
   val_before_train: False
   seed: 42
@@ -144,13 +189,13 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: true
-  hub_model_id: wzx111/Qwen3-1.7B-GSPO-math
+  hub_model_id: wzx111/Qwen3-1.7B-ADPO-Decoupled-math
   hub_private: true
   hub_final_upload: true
   hub_push_each_epoch: true
-  hub_commit_message: "VERL GSPO checkpoint"
+  hub_commit_message: "VERL ADPO Decoupled checkpoint"
 
-# Custom reward function (same as ADPO for fair comparison)
+# Custom reward function (good_accuracy from ADPO)
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy
@@ -171,14 +216,13 @@ reward_model:
 wandb_config:
   project: ADPO-GSPO-WZX
   entity: null
-  name: qwen3-1.7b-gspo-baseline
-  group: qwen3_gspo
+  name: qwen3-1.7b-adpo-decoupled
+  group: qwen3_adpo_ab_test
   tags:
-    - gspo
-    - grpo
-    - sentence-level
+    - adpo
+    - decoupled
     - qwen3
-    - math
+    - 4090
 
 # Ray distributed computing configuration
 ray_kwargs:

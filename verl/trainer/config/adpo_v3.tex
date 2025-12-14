@@ -1,0 +1,507 @@
+% !TeX program = pdflatex
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{newtxmath}
+\usepackage{microtype}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage[section]{placeins}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{hyperref}
+
+% ---------- Hyperref setup ----------
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+% ---------- Better cross-references ----------
+\usepackage[capitalize,noabbrev]{cleveref}
+
+% ---------- Theorem environments ----------
+\renewcommand{\qedsymbol}{} 
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% ---------- Math helpers ----------
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\softmax}{\mathrm{softmax}}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\Diag}{Diag}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% Anchoring temperature
+\newcommand{\tauanc}{\tau_{\mathrm{anc}}}
+
+\title{ADPO: Anchored Direct Preference Optimization\\[0.3em]
+\large A Unified Framework for Policy Learning}
+\author{Wang Zixian\\
+\small China Mobile Communications Group Shandong Co., Ltd. Tai'an Branch\\
+\small \texttt{wangzixian@sd.chinamobile.com}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Direct Preference Optimization (DPO) has emerged as a standard for aligning language models, yet its reliance on pairwise comparisons limits its ability to exploit full ranking structure. We introduce \textbf{Anchored Direct Preference Optimization (ADPO)}, a unified framework that generalizes DPO through reference anchoring and listwise targets. ADPO minimizes the \textbf{anchored cross-entropy}---equivalently, the \emph{forward} KL divergence $\KL(q\|\tilde{p}_\theta)$---between a target distribution $q$ and the policy's anchored logits. Unlike the reverse KL used in policy gradients (mode-seeking), the forward KL is \emph{mean-seeking}, yielding supervised-learning-like stability. Crucially, the anchor $\pi_{\mathrm{ref}}$ prevents the catastrophic forgetting that plagues na\"ive forward KL methods (SFT/KD), preserving prior knowledge while learning from new targets. Our contributions are: (1) \textbf{A Unified Design Map}: SFT, knowledge distillation, maximum-entropy RL, and DPO are \emph{instantiations of a single anchored projection principle}, differing only in $(q, \pi_{\mathrm{ref}}, \tauanc)$; (2) \textbf{Curvature Scaling Regularization}: The temperature $\tauanc$ modulates Fisher curvature ($\propto 1/\tauanc^2$), creating an implicit trust region without explicit clipping or constraint solvers; (3) \textbf{Empirical Validation}: Across bandits, MuJoCo, and LLMs, ADPO's listwise targets excel under distribution shift (+13.6\%), and Online ADPO outperforms GRPO by +30.9\% peak reward on Qwen3-1.7B (\textsc{math-lighteval} Level 3--4) while preventing the mode collapse observed in baseline methods.
+\end{abstract}
+
+\section{Introduction}
+
+Preference optimization has become a central technique for aligning large language models with human intent, complementing reinforcement learning from human feedback (RLHF)~\cite{Christiano2017RLHF,Ouyang2022InstructGPT}. Direct Preference Optimization (DPO)~\cite{Rafailov2023DPO} is attractive because it bypasses reward modeling, yet its pairwise Bradley--Terry formulation ignores rich ranking information available in multi-candidate settings. Meanwhile, trust-region methods like TRPO~\cite{Schulman2015TRPO} excel at stable exploration but require second-order optimization.
+
+We introduce \textbf{Anchored Direct Preference Optimization (ADPO)}, a geometric view of policy learning that operates in coordinates defined by a reference policy. By anchoring logits and minimizing a weighted cross-entropy, ADPO reveals that supervised fine-tuning (SFT), knowledge distillation (KD), maximum-entropy RL, trust-region policy optimization (TRPO/PPO), and DPO are not disjoint algorithms but coordinate choices of the same anchored projection principle.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=1.2em]
+    \item \textbf{Unified framework view}: Sections~\ref{sec:adpo}--\ref{sec:unified_framework} show that SFT, KD, max-ent RL, DPO, and trust-region methods emerge from different choices of the target $q$, anchor $\pi_{\mathrm{ref}}$, and temperature $\tauanc$.
+    \item \textbf{Forward KL and curvature scaling regularization}: Section~\ref{sec:forward_kl} reveals that ADPO's forward KL objective is \emph{mean-seeking} (unlike the mode-seeking reverse KL in PPO/TRPO), yielding stable optimization. Section~\ref{sec:geometry} shows how the temperature $\tauanc$ modulates Fisher curvature ($\propto 1/\tauanc^2$), creating an implicit trust region without explicit constraints.
+    \item \textbf{Anchor strategies}: Section~\ref{sec:anchor_strategies} disentangles fixed, self, and dynamic anchors, showing how on-policy anchoring ($\pi_{\mathrm{ref}} \leftarrow \pi_{\mathrm{old}}$) extends the framework to online RL.
+    \item \textbf{Comprehensive evaluation}: We validate ADPO across three regimes: robustness in noisy bandits, precision in offline distillation ($49\times$ KL reduction), and LLM reasoning (+30.9\% over GRPO on Qwen3-1.7B).
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work in preference optimization and trust-region methods. Section~\ref{sec:adpo} formalizes the ADPO framework, deriving the anchored cross-entropy objective and its geometric interpretation. Section~\ref{sec:anchor_strategies} discusses practical anchoring strategies for offline and online regimes. Finally, Section~\ref{sec:experiments} presents empirical results on synthetic bandits, continuous control, and large language models.
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Preference Optimization and RLHF.}
+Reinforcement Learning from Human Feedback (RLHF) typically involves learning a reward model from preferences and then optimizing a policy via PPO~\cite{Christiano2017RLHF,Ouyang2022InstructGPT,Stiennon2020Summary}. Direct Preference Optimization (DPO)~\cite{Rafailov2023DPO} simplifies this by deriving a closed-form solution to the KL-constrained reward maximization problem, optimizing policy-reference log ratios directly. Recent variants extend this paradigm: IPO~\cite{Azar2024IPO} adds a regularization term to prevent overfitting, CPO~\cite{Xu2024CPO} incorporates constraints for safety. ADPO generalizes these approaches by introducing an explicit anchoring mechanism that decouples the reference policy from the target distribution, allowing for more flexible geometric regularization.
+
+\textbf{Listwise and Ranking Objectives.}
+While pairwise comparisons are the standard for RLHF, they often discard valuable ranking information contained in multi-candidate responses. Listwise approaches leverage Plackett--Luce models~\cite{Plackett1975,Luce1959} or ranking losses to utilize the full preference order. Methods like SLiC~\cite{Zhao2023SLiC} and RAFT~\cite{Dong2023RAFT} demonstrate that listwise signals can improve sample efficiency and alignment performance. ADPO integrates listwise supervision naturally through its target distribution $q$, but unlike prior methods, it applies this supervision in anchored coordinates, ensuring stability even with high-dimensional ranking targets.
+
+\textbf{Trust-Region Methods and Distillation.}
+Ensuring stable policy updates is a central challenge in RL. Trust Region Policy Optimization (TRPO)~\cite{Schulman2015TRPO} and PPO~\cite{Schulman2017PPO} enforce stability via explicit KL constraints or clipping in parameter space. In the offline setting, Knowledge Distillation (KD)~\cite{Hinton2015Distilling} and its variants act as a form of regularized supervised learning. ADPO bridges these families: it can be viewed as a distribution-space trust-region method where the ``trust region'' is implicitly defined by the anchoring temperature $\tauanc$. This avoids the complexity of second-order optimization (as in TRPO) while providing stronger geometric guarantees than simple clipping (as in PPO).
+
+\textbf{Group-Relative Policy Optimization.}
+GRPO~\cite{Shao2024GRPO} extends PPO to preference learning by normalizing advantages within groups of sampled completions, enabling efficient online RLHF without a separate reward model. ADPO shares GRPO's group-relative structure but differs in two key aspects: (1) ADPO replaces PPO's ratio clipping with anchored logits and temperature-based curvature scaling, providing a principled geometric interpretation; (2) ADPO's listwise cross-entropy loss naturally accommodates soft targets $q$ beyond binary preferences, enabling knowledge distillation and multi-candidate ranking within the same framework.
+
+\section{Anchored Direct Preference Optimization (ADPO)}
+\label{sec:adpo}
+
+\subsection{Anchored Logits}
+\label{sec:setting}
+
+For each context $x$ (prompt or state) we consider a candidate set $S_x=\{y_1,\ldots,y_P\}$ with student log-probabilities $\ell_i=\log\pi_\theta(y_i|x)$ and anchor log-probabilities $\ell^{\mathrm{ref}}_i=\log\pi_{\mathrm{ref}}(y_i|x)$. The anchored logits are
+\begin{equation}
+u_i \;=\; \frac{\ell_i - \ell^{\mathrm{ref}}_i}{\tauanc}, \qquad i\in S_x,
+\end{equation}
+where $\tauanc>0$ is the \emph{anchoring temperature}. This parameter plays the same role as $1/\beta$ in DPO~\cite{Rafailov2023DPO}: smaller $\tauanc$ (larger $\beta$) amplifies log-ratio deviations from the anchor, imposing tighter regularization. Working with $u_i$ removes global shifts such as annotator, length, or state-value biases because softmax is translation invariant. All results assume either length-normalized sequence probabilities or per-group normalization for continuous actions, so affine shifts cancel automatically.
+
+\subsection{Unified Objective: From Forward KL to Anchored Cross-Entropy}
+\label{sec:objective}
+
+Let $q(\cdot|S_x)$ be a strictly positive target distribution (Bradley--Terry, Plackett--Luce, teacher logits, or Boltzmann policies), and let $\tilde{p}_\theta = \softmax((\ell-\ell^{\mathrm{ref}})/\tauanc)$ be the anchored policy. Formally, our objective is to minimize the \emph{forward} KL divergence between $q$ and $\tilde{p}_\theta$:
+\begin{equation}
+\label{eq:adpo_kl}
+\mathcal{J}(\theta) = \E_{x,S_x}\Big[\KL\big(q(\cdot|S_x) \,\|\, \tilde{p}_\theta(\cdot|S_x)\big)\Big].
+\end{equation}
+Since the target distribution $q$ is independent of $\theta$, minimizing this divergence is mathematically equivalent to minimizing the \textbf{anchored cross-entropy loss}:
+\begin{equation}
+\label{eq:adpo_objective}
+\mathcal{L}_{\mathrm{ADPO}}(\theta)
+= \E_{x,S_x}\Big[ - \sum_{i\in S_x} q(i|S_x)\log \tilde{p}_\theta(i|S_x) \Big].
+\end{equation}
+This formulation inherits the stability of supervised learning while retaining the geometric interpretation of KL minimization.
+
+\paragraph{Gradient and Optimization.}
+The gradient of the ADPO objective corresponds to the standard cross-entropy gradient in anchored coordinates:
+\begin{equation}
+\label{eq:adpo_grad_general}
+\nabla_\theta \mathcal{L}_{\mathrm{ADPO}}
+= \frac{1}{\tauanc}\,\E_{x,S_x}\!\left[\sum_{i\in S_x}\big(\tilde{p}_\theta(i|S_x)-q(i|S_x)\big)\big(\nabla_\theta \ell_i - \nabla_\theta \ell_i^{\mathrm{ref}}\big)\right].
+\end{equation}
+Note that any constant shift to all logits cancels out because $\sum_{i}(\tilde{p}_\theta(i)-q(i))=0$. This confirms that standard backpropagation through the softmax naturally handles the translation invariance without explicit centering.
+When the anchor is frozen (offline ADPO), the term $\nabla_\theta \ell_i^{\mathrm{ref}}$ vanishes, reducing to a weighted likelihood maximization.
+
+\begin{proposition}[Closed-form optimum]\label{prop:closed_form}
+If $\pi_\theta$ can match $q(\cdot|S_x)$ exactly and $\pi_{\mathrm{ref}}(y|x)>0$ whenever $q(y|x)>0$, then the global optimum of~\eqref{eq:adpo_objective} satisfies
+\begin{equation}
+\pi_\theta^\star(y|x) \;=\; \frac{\pi_{\mathrm{ref}}(y|x)\,q(y|x)^{\tauanc}}{\sum_{y'\in S_x} \pi_{\mathrm{ref}}(y'|x)\,q(y'|x)^{\tauanc}}.
+\end{equation}
+\end{proposition}
+\begin{proof}
+See Appendix~\ref{app:proof_closed_form} for the full derivation.
+\end{proof}
+
+\subsection{A Unified Framework}
+\label{sec:unified_framework}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Unified framework induced by ADPO.} Changing $(q,\pi_{\mathrm{ref}},\tauanc)$ recovers well-known paradigms.}
+\label{tab:unified_framework}
+\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Paradigm} & \textbf{Target $q$} & \textbf{Anchor $\pi_{\mathrm{ref}}$} & \textbf{Temp $\tauanc$} & \textbf{Interpretation} \\
+\midrule
+SFT & Data (one-hot) & Uniform & $1$ & Cross-entropy in anchored coords \\
+KD & Soft Teacher $\pi_T^{1/T}$ & Uniform & $T$ & Temperature-scaled distillation \\
+Max-Ent RL & $\propto e^{Q/\alpha}$ & Uniform & $1$ & Boltzmann policy matching \\
+DPO & Preference Data & SFT ref. & $1/\beta$ & Contrastive log-ratio matching \\
+ADPO & Listwise/soft $q$ & Flexible & Adaptive & Unified anchored projection \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Equation~\eqref{eq:adpo_objective} reveals that classical algorithms differ only in $(q,\pi_{\mathrm{ref}},\tauanc)$. Table~\ref{tab:unified_framework} summarizes the mapping. From the optimization perspective, all these methods minimize the cross-entropy between a constructed target $q$ and the anchored policy $\tilde{p}_\theta$.
+
+\subsection{Theoretical Analysis}
+\label{sec:theory}
+
+We now analyze why this simple anchored cross-entropy objective yields robust policy optimization.
+
+\subsubsection{Implicit Trust Region via Curvature Scaling}
+\label{sec:geometry}
+
+The Fisher information of $\tilde{p}_\theta$ is $F = \Diag(\tilde{p}_\theta) - \tilde{p}_\theta \tilde{p}_\theta^\top$. Due to softmax's translation invariance, optimization implicitly occurs in the tangent space $\mathbf{1}^\perp$. The local quadratic approximation of the loss is:
+\begin{equation}
+\mathcal{L}_{\mathrm{ADPO}}
+\approx \frac{1}{2\tauanc^2} \delta^\top (\Diag(q) - qq^\top)\delta + \text{const},
+\qquad
+\delta = u-u^\star.
+\end{equation}
+The factor $1/\tauanc^2$ arises from the chain rule applied twice when transforming from logits $\ell$ to anchored coordinates $u=(\ell-\ell^{\mathrm{ref}})/\tauanc$. Smaller $\tauanc$ amplifies the curvature of the loss landscape: the same deviation $\delta$ incurs a penalty scaled by $1/\tauanc^2$, forcing optimization to take smaller steps in distribution space. This \emph{curvature scaling} confines updates near the anchor without requiring explicit constraint solvers or clipping, and explains ADPO's empirical stability under noise.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.55\linewidth]{fig_anchored_bowl_axes.png}
+\caption{\textbf{Implicit trust region via curvature scaling.} The Fisher metric $\Diag(q)-qq^\top$ defines a quadratic bowl in anchored coordinates $u=(\ell-\ell^{\mathrm{ref}})/\tauanc$. Smaller $\tauanc$ yields sharper curvature ($\propto 1/\tauanc^2$), confining updates near the anchor and creating an implicit trust region.}
+\label{fig:anchored_bowl}
+\end{figure}
+
+\subsubsection{Forward KL: Stability without Forgetting}
+\label{sec:forward_kl}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\linewidth]{policy_plot.png}
+\caption{\textbf{Comparison of policy optimization dynamics.} Gray fill: prior knowledge; dashed line: target distribution. \textbf{(1) SFT} (Forward KL) suffers probability smearing (over-generalization) to cover the target support. \textbf{(2) Standard RL} (Reverse KL) is mode-seeking and overly sharp. \textbf{(3) ADPO} leverages multiplicative anchoring ($\pi_{\mathrm{ref}} \cdot q^{\tauanc}$) to maintain precision while ensuring coverage.}
+\label{fig:policy_dynamics}
+\end{figure}
+
+A key theoretical distinction of ADPO lies in its use of the \emph{forward} KL divergence. Traditional policy gradient methods (PPO, TRPO) implicitly optimize variants of the \emph{reverse} KL $\KL(\pi_\theta \| \pi^\star)$, which is \emph{mode-seeking}: the policy concentrates on the highest-reward mode of $\pi^\star$. In contrast, ADPO minimizes the forward KL $\KL(q \| \tilde{p}_\theta)$, which is \emph{mean-seeking}: the policy covers the support of $q$.
+
+\begin{remark}[Relation to MaxEnt RL]\label{rem:maxent}
+When $q$ is constructed as a Boltzmann distribution over rewards, $q(y|x) \propto \pi_{\mathrm{ref}}(y|x)\exp(R(x,y)/\beta_r)$, minimizing the anchored cross-entropy is equivalent to the \emph{M-projection step} in regularized policy iteration~\cite{Abdolmaleki2018MPO}.
+\end{remark}
+
+\paragraph{Balancing Coverage and Precision.}
+A fundamental challenge in policy optimization is balancing \emph{mode coverage} against \emph{precision}. Standard SFT minimizes the forward KL divergence $\E_{x}[\KL(q \| \pi_\theta)]$, which is known to be \emph{mean-seeking} or \emph{zero-avoiding}~\cite{Murphy2012}. While this ensures training stability and prevents the mode collapse typical of reverse-KL RL methods (e.g., PPO), it inherently tends to \emph{over-generalize}---a phenomenon known as \emph{probability smearing}---where the model assigns probability mass to low-quality regions to cover the entire support of a broad target $q$.
+
+ADPO resolves this dilemma by operating in an \emph{anchored coordinate system}. Although ADPO minimizes a forward KL objective, the policy parameterization $\tilde{p}_\theta \propto \pi_{\mathrm{ref}} \cdot \exp(\tauanc u)$ introduces a multiplicative geometric constraint. Consider the optimal policy form derived in Proposition~\ref{prop:closed_form}:
+\begin{equation}
+    \pi_\theta^\star(y|x) \propto \pi_{\mathrm{ref}}(y|x) \cdot q(y|x)^{\tauanc}.
+\end{equation}
+This multiplicative interaction ensures that even if the target $q(y|x)$ is high-entropy (which would cause standard SFT to smear), the resulting policy is constrained by the shape of the reference prior $\pi_{\mathrm{ref}}(y|x)$. Specifically, in regions where the target provides no discriminative signal (i.e., $q$ is uniform), the anchored constraint ensures $\pi_\theta^\star$ collapses back to $\pi_{\mathrm{ref}}$ rather than smoothing out to a uniform distribution.
+
+Thus, ADPO leverages the stability of Forward KL while mitigating smearing, effectively bridging the gap between supervised learning and reinforcement learning. This mechanism underpins the $49\times$ reduction in student--teacher KL observed in our experiments (Table~\ref{tab:distillation_continuous}).
+
+\subsection{Adaptive Temperature for Online RL}
+\label{sec:adaptive_temperature}
+
+In online RL, the policy's confidence (entropy $H$) and performance (reward $R$) fluctuate dynamically. A fixed anchoring temperature $\tauanc$ is suboptimal: it may be too loose when the policy is ``confused'' (high $H$, risking drift) or too tight when the policy is ``mastering'' the task (low $H$, high $R$, slowing learning). We identify three critical regimes that necessitate adaptive regularization:
+
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+    \item \textbf{The Confused Beginner} ($H \uparrow, R \downarrow$): The policy is uncertain and performing poorly. We need $\tauanc \uparrow$ to tighten the trust region and rely on the anchor.
+    \item \textbf{The Arrogant Idiot} ($H \downarrow, R \downarrow$): The policy is confident but wrong---a signature of mode collapse. We need $\tauanc \uparrow\uparrow$ (strong penalty) to forcefully pull the policy back to the anchor.
+    \item \textbf{The Master} ($H \downarrow, R \uparrow$): The policy is confident and correct. We need $\tauanc \approx \tau_{\mathrm{base}}$ to allow fine-tuning without excessive constraint.
+\end{itemize}
+
+To address these regimes smoothly, we introduce a \textbf{Smooth Hybrid} adaptive strategy:
+\begin{equation}
+\label{eq:smooth_hybrid}
+\tauanc(x) = \tau_{\mathrm{base}} \cdot \Big( 1 \;+\; \alpha \bar{H} \;+\; \beta (1-\bar{H})(1-R) \Big),
+\end{equation}
+where $\bar{H} \in [0,1]$ is the normalized entropy. This formula combines an \emph{uncertainty term} ($\alpha \bar{H}$) that guards against exploration noise, and a \emph{penalty term} ($\beta (1-\bar{H})(1-R)$) that specifically targets the ``Arrogant Idiot'' scenario. Unlike entropy-only scaling (which misses mode collapse) or hard thresholds (which introduce gradient discontinuities), this strategy provides a continuous, differentiable mechanism that stabilizes online learning across all phases.
+
+\subsection{Anchor Strategies and Practical Guidance}
+\label{sec:anchor_strategies}
+
+Anchoring separates \emph{geometry} (set by $q$) from \emph{coordinate choices} (set by $\pi_{\mathrm{ref}}$). We consider three regimes:
+\begin{itemize}
+    \item \textbf{Fixed/uniform anchors}: Suitable for offline settings such as SFT, KD, or preference datasets. They provide a stable origin and prevent catastrophic forgetting during distillation, cutting student--teacher KL by $4$--$49\times$ in our MuJoCo experiments.
+    \item \textbf{Self or EMA anchors}: The student is anchored to its initialization or an exponential moving average. This balances stability and adaptivity for high-precision imitation.
+    \item \textbf{Dynamic/On-Policy anchors}: In online RL, setting $\pi_{\mathrm{ref}} \leftarrow \pi_{\mathrm{old}}$ (the policy used for data collection) creates a moving coordinate frame similar to TRPO. This is computationally efficient (no separate reference model needed) and boosts exploration by penalizing deviation from the sampling distribution. Coupled with adaptive temperature, this regime serves as our default for LLM reasoning tasks.
+\end{itemize}
+Because the loss always measures deviations relative to the chosen anchor, practitioners can swap anchors without revisiting the derivation—only the interpretation of updates changes.
+
+\subsection{Algorithm and Implementation}
+\label{sec:algorithm_implementation}
+
+We summarize ADPO in a unified algorithm that covers both online RL and offline preference learning.
+
+\begin{algorithm}[H]
+\caption{ADPO (Unified): Online RL and Offline Preference Learning}
+\label{alg:adpo_unified}
+\begin{algorithmic}[1]
+\Require Mode $\in\{\textsc{online},\textsc{offline}\}$; base temp $\tau_{\mathrm{base}}$; learning rate $\eta$
+\State Initialize policy $\pi_\theta$
+\If{\textsc{offline}}
+    \State Load dataset $\mathcal{D}$; set fixed anchor $\pi_{\mathrm{ref}}$ (e.g., SFT model)
+\EndIf
+\For{training loop $t = 1, \ldots, T$}
+    \For{batch update}
+        \State Sample contexts $\{x_j\}_{j=1}^B$
+        \If{\textsc{online}}
+            \State $\pi_{\mathrm{ref}} \leftarrow \pi_{\mathrm{old}}$ \Comment{On-Policy: Anchor to sampling policy}
+            \State Sample group $S_{x_j} \sim \pi_{\mathrm{old}}(\cdot|x_j)$
+            \State Compute rewards $R$ and advantages $A$ (Group-Relative Z-Score)
+            \State Target: $q(i|S_{x_j}) \leftarrow \softmax(A_i/\beta_r)$
+        \Else
+            \State Retrieve $S_{x_j}$ and compute $q$ from fixed preferences
+        \EndIf
+        
+        \For{each context $x_j$}
+            \State \textbf{// 1. Adaptive Temperature (Smooth Hybrid)}
+            \State Compute normalized entropy $\bar{H}$ and reward $R$
+            \State $\tauanc \leftarrow \tau_{\mathrm{base}} \cdot \big( 1 + \alpha \bar{H} + \beta (1-\bar{H})(1-R) \big)$
+            
+            \State \textbf{// 2. Anchored Logits}
+            \State $u_i \leftarrow \big(\log\pi_\theta(y_i) - \log\pi_{\mathrm{ref}}(y_i)\big)/\tauanc$
+            \State $\tilde{p}_\theta(i|x_j) \leftarrow \softmax(u)_i$
+        \EndFor
+        \State $\mathcal{L} \leftarrow -\frac{1}{B}\sum_{j=1}^B \sum_{i \in S_{x_j}} q(i|S_{x_j}) \log \tilde{p}_\theta(i|S_{x_j})$ \Comment{Cross-entropy}
+        \State Update $\theta \leftarrow \theta - \eta \nabla_\theta \mathcal{L}$
+    \EndFor
+    
+    \If{\textsc{offline} \textbf{and} Dynamic Anchor}
+        \State Update $\pi_{\mathrm{ref}} \leftarrow \pi_\theta$ every $N$ steps
+    \EndIf
+\EndFor
+\State \Return $\pi_\theta$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate ADPO across three distinct regimes: (1) controlled robustness and scaling tests on synthetic contextual bandits, (2) high-precision offline distillation on MuJoCo benchmarks, and (3) large-scale reasoning alignment with LLMs.
+
+\subsection{Contextual Bandits: Robustness and Scaling}
+
+\textbf{Setup.} We evaluate on noisy contextual bandits using neural network policies (MLP). All methods use identical architectures and optimizers (AdamW, $\eta=5\times10^{-4}$). Reference policies are pre-trained for 30 steps on clean data to simulate SFT initialization.
+We test 12 scenarios: 4 corruption types (Gaussian+outliers, distribution shift, adversarial flips, heavy-tailed Cauchy) $\times$ 3 difficulty levels.
+
+\textbf{Baselines.} We compare ADPO against \textbf{DPO-Soft/Hard} (pairwise), \textbf{PPO} (clipping), and \textbf{TRPO} (KL penalty). We report \emph{WinMass} (probability mass on the optimal item).
+
+\begin{figure}[H]
+\centering
+% Top panel: Robustness
+\begin{subfigure}[b]{0.95\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{difficulty_comparison.png}
+    \caption{Robustness across 12 noisy scenarios}
+    \label{fig:sub_robustness}
+\end{subfigure}
+
+\vspace{1em}
+
+% Bottom panel: Scaling
+\begin{subfigure}[b]{0.6\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{model_size_comparison.png}
+    \caption{Scaling with model capacity}
+    \label{fig:sub_scaling}
+\end{subfigure}
+\caption{\textbf{Robustness and scaling comparison.} \textbf{(a)} Performance across 12 noisy contextual bandit scenarios. TRPO (pink) achieves highest WinMass in 8/12 settings via explicit KL regularization. ADPO Listwise-Raw (green dashed) excels under distribution shift and adversarial corruption. \textbf{(b)} Model scaling on Heavy Noise-Medium. TRPO and ADPO benefit from larger capacity, while PPO degrades at large scale.}
+\label{fig:merged_results}
+\end{figure}
+
+\paragraph{Result 1: Robustness to Noisy Preferences.}
+As shown in Figure~\ref{fig:merged_results}(a):
+\begin{itemize}
+    \item \textbf{TRPO dominates}: Trust-region RL achieves the highest WinMass in 8/12 scenarios (+2.5\% to +10.6\% over DPO), demonstrating the value of explicit regularization under heavy noise.
+    \item \textbf{ADPO Listwise-Raw excels in specific regimes}: Particularly strong under distribution shift (+13.6\%) and adversarial corruption (+9.3\%), where listwise soft targets capture ranking structure that pairwise methods miss.
+    \item \textbf{PPO struggles}: Standard PPO with ratio clipping underperforms in high-noise settings (-8.8\% on distribution shift), suggesting clipping alone is insufficient.
+\end{itemize}
+
+\paragraph{Result 2: Impact of Model Capacity.}
+Figure~\ref{fig:merged_results}(b) shows scaling behavior (hidden dims 64/128/256) on heavy noise:
+\begin{itemize}
+    \item \textbf{TRPO scales best}: Reaches 0.796 WinMass at medium size.
+    \item \textbf{ADPO Listwise benefits from capacity}: Improves from 0.558 to 0.791, leveraging listwise signals.
+    \item \textbf{PPO degrades}: Drops from 0.772 to 0.748 at large scale, indicating potential overfitting.
+\end{itemize}
+
+\subsection{Precision in Offline Distillation}
+
+In MuJoCo distillation, anchored variants dominate KD (Table~\ref{tab:distillation_continuous}). On HalfCheetah-v5, ADPO-self-anchor reaches $279.3$ (vs.\ KD $-309.0$), and Student--Teacher KL drops by $49\times$ ($30.50 \to 0.62$), validating the implicit trust region.
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Policy distillation on continuous control (MuJoCo).} Results averaged over 5 seeds. ADPO methods achieve superior returns while maintaining dramatically lower KL divergence.}
+\label{tab:distillation_continuous}
+\small
+\begin{tabular}{llccc}
+\toprule
+\textbf{Environment} & \textbf{Method} & \textbf{Return} & \textbf{NDCG} & \textbf{KL} $\downarrow$ \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{HalfCheetah-v5\\(Teacher: 8476.5)}} 
+  & KD & $-309.0 \pm 98.2$ & \textbf{0.857} & 30.50 \\
+  & ADPO-self-anchor & $\mathbf{279.3 \pm 53.2}$ & 0.765 & 10.45 \\
+  & ADPO-self-anchor-EMA & $166.8 \pm 227.0$ & 0.858 & \textbf{0.62} \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Hopper-v5\\(Teacher: 1169.8)}} 
+  & KD & $36.9 \pm 20.2$ & \textbf{0.799} & 16.98 \\
+  & ADPO-self-anchor & $177.3 \pm 158.4$ & 0.684 & 7.61 \\
+  & ADPO-self-anchor-EMA & $\mathbf{855.6 \pm 269.1}$ & 0.755 & \textbf{3.97} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Scalability to Reasoning with LLMs}
+
+We validate ADPO's scalability by fine-tuning \textbf{Qwen3-1.7B} on \textsc{math-lighteval} (Level 3--4, 5.6k training problems) and comparing against GRPO~\cite{Shao2024GRPO} under identical conditions.
+
+\paragraph{Reward Function.}
+We use a binary accuracy reward with repetition penalty. Given a model completion $y$ and ground-truth solution $s$:
+\begin{equation}
+R(y, s) = \begin{cases}
+1.0 & \text{if } \texttt{verify}(\texttt{parse}(y), \texttt{parse}(s)) = \text{True} \\
+-\lambda \cdot \text{rep}(y) & \text{otherwise}
+\end{cases}
+\end{equation}
+where $\texttt{parse}(\cdot)$ extracts LaTeX expressions from \texttt{<answer>} tags, $\texttt{verify}(\cdot)$ performs symbolic equivalence checking via \texttt{math-verify}, and $\text{rep}(y)$ is the n-gram repetition ratio (penalizing degenerate outputs). We set $\lambda=0.1$.
+
+\paragraph{Training Configuration.}
+Both methods share: learning rate $1.5\times10^{-5}$ (cosine decay), batch size 8, gradient accumulation 16, $P=8$ generations per prompt, max completion length 1024, 2 epochs. ADPO uses $\tau_{\mathrm{base}}=0.8$, $\beta_r=0.5$, adaptive temperature ($\alpha=1.0$, $\tau_{\min}=0.1$), and on-policy anchoring. GRPO uses ratio clipping ($\epsilon=0.2$) with $\beta=0$ (no KL penalty), following the DeepSeekMath configuration.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{adpo_vs_grpo_comparison.png}
+\caption{\textbf{ADPO vs GRPO on Qwen3-1.7B (\textsc{math-lighteval} Level 3--4).} \textbf{(a)} Training reward. GRPO collapses around step 40 (reward $\to 0$), while ADPO reaches 0.89 peak reward. \textbf{(b)} Completion length. GRPO's length drops then saturates at 1024 (degenerate outputs); ADPO maintains stable lengths around 1000--1200 tokens.}
+\label{fig:wandb_llm}
+\end{figure}
+
+\paragraph{Results.}
+As shown in Figure~\ref{fig:wandb_llm}, within 60 training steps:
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+    \item \textbf{ADPO achieves higher peak reward}: 0.89 vs GRPO's 0.68 (+30.9\%).
+    \item \textbf{GRPO suffers mode collapse}: Around step 40, GRPO's reward drops to near-zero, and completion length first collapses to $<100$ tokens then saturates at the maximum (1024), indicating the model produces degenerate outputs.
+    \item \textbf{ADPO maintains stability}: ADPO sustains reward $\approx 0.6$--$0.9$ throughout training with stable completion lengths around 1000--1200 tokens.
+\end{itemize}
+These results demonstrate that ADPO's curvature scaling regularization provides stronger stability than GRPO's ratio clipping.
+
+\section{Discussion and Limitations}
+
+\paragraph{Forward KL as a design choice.}
+ADPO's use of the forward KL $\KL(q\|\pi_\theta)$ rather than the reverse KL $\KL(\pi_\theta\|q)$ has important implications. The forward KL is mean-seeking: it penalizes the policy for assigning low probability to any region where $q$ has mass. This naturally prevents mode collapse and encourages diverse outputs. In contrast, the reverse KL (used implicitly in PPO/TRPO) is mode-seeking and can concentrate probability mass on a single mode. Our LLM experiments (Figure~\ref{fig:wandb_llm}) provide empirical evidence for this distinction: GRPO collapses while ADPO maintains stable, diverse generations.
+
+\paragraph{Decoupling target and anchor.}
+ADPO explicitly separates "what to learn" (target $q$) from "how to constrain" (anchor $\pi_{\mathrm{ref}}$, temperature $\tauanc$). Standard DPO tightly binds $q$ to a Bradley--Terry model derived from implicit rewards, whereas ADPO allows $q$ to be any valid distribution---teacher soft labels, KDE-smoothed preferences, or reward-model scores. This modularity enables practitioners to tailor supervision independently of the regularization mechanism.
+
+\paragraph{Curvature scaling vs explicit constraints.}
+ADPO's curvature scaling mechanism differs fundamentally from explicit trust-region methods:
+\begin{itemize}[leftmargin=1.2em,itemsep=0pt]
+    \item \textbf{TRPO}: Hard constraint $\KL(\pi_{\text{old}}\|\pi_{\text{new}})\le\delta$ requires solving a constrained optimization problem, often via conjugate gradient with Fisher-vector products ($\mathcal{O}(n^2)$ per iteration).
+    \item \textbf{PPO}: Clipping the probability ratio $r(\theta)=\pi_\theta/\pi_{\text{old}}$ within $[1-\epsilon,1+\epsilon]$ approximates TRPO's constraint but can be overly conservative or fail in high-curvature regions.
+    \item \textbf{ADPO}: The factor $1/\tauanc^2$ in Eq.~(6) directly modulates the Fisher metric's effective curvature. Standard first-order optimizers (SGD/Adam) suffice because the regularization is baked into the loss geometry, not imposed post-hoc. This avoids inverting the Fisher matrix yet achieves stable updates by amplifying penalties for deviations from the anchor.
+\end{itemize}
+
+\paragraph{Limitations.}
+We identify three main limitations of the current work:
+\begin{enumerate}[leftmargin=1.2em,itemsep=2pt]
+    \item \textbf{Distribution-parameter space mismatch}: ADPO's implicit trust region operates in distribution space (via anchored logits), but optimization occurs in parameter space. Under aggressive learning rates, a small parameter update can cause large distribution shifts, potentially violating the implicit trust region. Combining ADPO with natural gradient methods~\cite{Amari1998NaturalGradient} could address this gap.
+    \item \textbf{Hyperparameter sensitivity}: The framework introduces multiple hyperparameters ($\tauanc$, $\alpha$, $\tau_{\min}$, $\beta_r$) that interact non-trivially. While we provide default values, optimal settings may vary across domains. Automated tuning strategies (e.g., population-based training) remain unexplored.
+    \item \textbf{Limited LLM evaluation scale}: Our LLM experiments focus on a single model (Qwen3-1.7B) and dataset (\textsc{math-lighteval} Level 3--4). Validating ADPO on larger models (7B+), diverse reasoning benchmarks (GSM8K, ARC, MMLU), and comparison with recent methods (GRPO, SimPO, KTO) would strengthen the empirical claims.
+\end{enumerate}
+
+\section{Conclusion}
+
+ADPO reframes policy learning as an anchored projection that unifies SFT, KD, RL, and preference optimization within a single geometric lens. By minimizing the forward KL (mean-seeking) rather than the reverse KL (mode-seeking), ADPO achieves supervised-learning-like stability while retaining the flexibility to incorporate reward signals. Our comprehensive evaluation across three regimes reveals distinct strengths:
+\begin{enumerate}[leftmargin=1.2em,itemsep=0pt]
+    \item \textbf{Synthetic Robustness}: In 12 diverse noise scenarios, TRPO's explicit KL regularization proves most robust (+2.5--10.6\%), while ADPO's listwise supervision excels under distribution shift (+13.6\%).
+    \item \textbf{Offline Precision}: For policy distillation, ADPO's anchored objective dramatically improves fidelity over KD, reducing student--teacher KL by $4$--$49\times$.
+    \item \textbf{LLM Scalability}: On mathematical reasoning (Qwen3-1.7B, math-lighteval-level 3,4), ADPO outperforms GRPO by +30.9\% peak reward while avoiding the mode collapse that causes GRPO's reward to drop to near-zero around step 40.
+\end{enumerate}
+This unified framework turns algorithm selection into principled coordinate choices—offering actionable guidance for robust RLHF pipelines.
+
+\begin{thebibliography}{99}\setlength{\itemsep}{0pt}
+\bibitem{Rafailov2023DPO} R.~Rafailov, A.~Sharma, E.~Mitchell, S.~Ermon, C.~D.~Manning, and C.~Finn. Direct Preference Optimization: Your Language Model is Secretly a Reward Model. \emph{NeurIPS}, 2023.
+
+\bibitem{Murphy2012} K.~P. Murphy. \emph{Machine Learning: A Probabilistic Perspective}. MIT press, 2012.
+
+\bibitem{Christiano2017RLHF} P.~Christiano, et al. Deep Reinforcement Learning from Human Preferences. \emph{NeurIPS}, 2017.
+
+\bibitem{Ouyang2022InstructGPT} L.~Ouyang, et al. Training Language Models to Follow Instructions with Human Feedback. \emph{NeurIPS}, 2022.
+
+\bibitem{Schulman2017PPO} J.~Schulman, et al. Proximal Policy Optimization Algorithms. arXiv:1707.06347, 2017.
+
+\bibitem{Azar2024IPO} M.~G. Azar, et al. A General Theoretical Paradigm to Understand Learning from Human Preferences. arXiv:2310.12036, 2023.
+
+\bibitem{Xu2024CPO} H.~Xu, et al. Contrastive Preference Optimization. arXiv:2401.08417, 2024.
+
+\bibitem{Rosset2024OnlineDPO} C.~Rosset, et al. Direct Nash Optimization: Teaching Language Models to Self-Improve with General Preferences. arXiv:2404.03715, 2024.
+
+\bibitem{BradleyTerry1952} R.~A. Bradley and M.~E. Terry. Rank Analysis of Incomplete Block Designs: I. The Method of Paired Comparisons. \emph{Biometrika}, 39(3/4):324--345, 1952.
+
+\bibitem{Plackett1975} R.~L. Plackett. The Analysis of Permutations. \emph{Applied Statistics}, 24(2):193--202, 1975.
+
+\bibitem{Luce1959} R.~D. Luce. \emph{Individual Choice Behavior}. Wiley, 1959.
+
+\bibitem{Zhao2023SLiC} Y.~Zhao, et al. Calibrating Sequence Likelihood Improves Conditional Language Generation. \emph{ICLR}, 2023.
+
+\bibitem{Dong2023RAFT} H.~Dong, et al. RAFT: Reward rAnked FineTuning. arXiv:2304.06767, 2023.
+
+\bibitem{Xiong2024ListwiseDPO} W.~Xiong, et al. Iterative Preference Learning from Human Feedback. arXiv:2312.11456, 2023.
+
+\bibitem{Casper2023RLHF_Survey} S.~Casper, et al. Open Problems and Fundamental Limitations of RLHF. arXiv:2307.15217, 2023.
+
+\bibitem{Stiennon2020Summary} N.~Stiennon, et al. Learning to Summarize from Human Feedback. \emph{NeurIPS}, 2020.
+
+\bibitem{Gleave2022Uncertainty} A.~Gleave, et al. Quantifying Differences in Reward Functions. \emph{ICLR}, 2021.
+
+\bibitem{Zhu2023RobustRLHF} B.~Zhu, et al. Principled RLHF from Pairwise or $K$-wise Comparisons. \emph{ICML}, 2023.
+
+\bibitem{Pan2025PO} M.~Pan, G.~Lin, Y.-W.~Luo, B.~Zhu, Z.~Dai, L.~Sun, and C.~Yuan. Preference Optimization for Combinatorial Optimization Problems. \emph{ICML}, 2025. arXiv:2505.08735.
+
+\bibitem{Ziebart2008MaxEnt} B.~D. Ziebart, A.~Maas, A.~D. Bagnell, and A.~K. Dey. Maximum Entropy Inverse Reinforcement Learning. \emph{ICML}, 2008.
+
+\bibitem{Haarnoja2018SAC} T.~Haarnoja, A.~Zhou, P.~Abbeel, and S.~Levine. Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor. In \emph{ICML}, 2018.
+
+\bibitem{Haarnoja2017SAC} T.~Haarnoja, H.~Tang, P.~Abbeel, and S.~Levine. Reinforcement Learning with Deep Energy-Based Policies. \emph{ICML}, 2017. (Energy-based policies for maximum-entropy RL.)
+
+\bibitem{Hinton2015Distilling} G.~Hinton, O.~Vinyals, and J.~Dean. Distilling the Knowledge in a Neural Network. arXiv:1503.02531, 2015.
+
+\bibitem{Schulman2015TRPO} J.~Schulman, S.~Levine, P.~Moritz, M.~I. Jordan, and P.~Abbeel. Trust Region Policy Optimization. \emph{ICML}, 2015.
+
+\bibitem{Peng2019AWR} X.~B. Peng, A.~Kumar, G.~Zhang, and S.~Levine. Advantage-Weighted Regression: Simple and Scalable Off-Policy Reinforcement Learning. arXiv:1910.00177, 2019.
+
+\bibitem{Nair2020AWAC} A.~Nair, M.~Dalal, A.~Gupta, and S.~Levine. Accelerating Online Reinforcement Learning with Offline Datasets. arXiv:2006.09359, 2020.
+
+\bibitem{Abdolmaleki2018MPO} A.~Abdolmaleki, J.~T. Springenberg, Y.~Tassa, R.~Munos, N.~Heess, and M.~Riedmiller. Maximum a Posteriori Policy Optimisation. \emph{ICLR}, 2018.
+
+\bibitem{Amari1998NaturalGradient} S.~Amari. Natural Gradient Works Efficiently in Learning. \emph{Neural Computation}, 10(2):251--276, 1998.
+
+\bibitem{Nesterov2004Convex} Y.~Nesterov. \emph{Introductory Lectures on Convex Optimization: A Basic Course}. Springer, 2004.
+
+\bibitem{Shao2024GRPO} Z.~Shao, P.~Wang, Q.~Zhu, R.~Xu, J.~Song, M.~Zhang, Y.~K.~Li, Y.~Wu, and D.~Guo. DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. arXiv:2402.03300, 2024.
+\end{thebibliography}
+
+\input{appendix_v3}
+
+\end{document}
+

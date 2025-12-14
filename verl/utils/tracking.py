@@ -155,21 +155,52 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
+    def finish(self):
+        """Explicitly finish all loggers. Recommended to call this before program exit."""
         if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
+            try:
+                self.logger["wandb"].finish(exit_code=0)
+            except Exception:
+                pass  # Ignore errors if wandb is already closed
         if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
+            try:
+                self.logger["swanlab"].finish()
+            except Exception:
+                pass
         if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
+            try:
+                self.logger["vemlp_wandb"].finish(exit_code=0)
+            except Exception:
+                pass
         if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
+            try:
+                self.logger["tensorboard"].finish()
+            except Exception:
+                pass
         if "clearml" in self.logger:
-            self.logger["clearml"].finish()
+            try:
+                self.logger["clearml"].finish()
+            except Exception:
+                pass
         if "trackio" in self.logger:
-            self.logger["trackio"].finish()
+            try:
+                self.logger["trackio"].finish()
+            except Exception:
+                pass
         if "file" in self.logger:
-            self.logger["file"].finish()
+            try:
+                self.logger["file"].finish()
+            except Exception:
+                pass
+
+    def __del__(self):
+        """Cleanup on garbage collection. Suppress errors during interpreter shutdown."""
+        try:
+            self.finish()
+        except Exception:
+            # During interpreter shutdown, resources may already be freed
+            # Suppress all exceptions to avoid error messages
+            pass
 
 
 class ClearMLLogger:

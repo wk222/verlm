@@ -106,7 +106,7 @@ algorithm:
 
 # Trainer configuration
 trainer:
-  total_epochs: 2
+  total_epochs: 4
   project_name: ADPO-pk-GRPO
   experiment_name: qwen3-1.7b-gspo-2a100
   logger: ['wandb', 'console']

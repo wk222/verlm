@@ -225,7 +225,7 @@ def compute_adpo_advantages(
             # 2. 可以正确计算组内 softmax
             # 3. 后续 loss 计算时可以跨 micro-batch
             # ============================================================
-            if use_delayed_softmax:
+            if use_delayed_softmax or config.get("use_precomputed_q", False):
                 # 计算 p_target = softmax(advantage / beta_reward)，按组归一化
                 # 使用 scatter 实现组内 softmax
                 scaled_adv = advantages / beta_reward
@@ -247,7 +247,7 @@ def compute_adpo_advantages(
                 # 通过 kwargs 返回（调用方需要处理）
                 extra_returns = kwargs.get("extra_returns", None)
                 if extra_returns is not None and isinstance(extra_returns, dict):
-                    extra_returns["p_target"] = p_target
+                    extra_returns["q_target"] = p_target
                 
         else:
             # Fallback: Global Mean/Std (if no index provided)
@@ -459,11 +459,18 @@ def adpo_policy_loss(
     pl_label_smoothing = _cfg("pl_label_smoothing", 0.1)  # 软化排序目标 (推荐 0.05-0.2)
     
     # Softmax 变体的新公式参数: u = ℓ - A·ℓ_ref - B·q
-    # 系数 A 控制 reference model 的锚定强度 (默认 1.0)
-    # 系数 B 控制 target distribution q 的减法项 (默认 0.5)
-    # 默认公式: u = log_prob - 1.0 * old_log_prob - 0.5 * q
+    # Softmax 变体的超参数: u = (log_prob - A·old_log_prob - B·q - C) / tau
+    # 系数 A 控制 reference model 的锚定强度
+    # 系数 B 控制 target distribution q 的减法项
+    # 系数 C 控制常数偏移项
+    # 
+    # 变体示例:
+    # - Standard ADPO: A=1, B=0, C=0 → u = (log_prob - old_log_prob) / tau
+    # - SFT Variant:   A=0, B=0, C=0 → u = log_prob / tau
+    # - 其他探索:      A=0.5 等中间值
     softmax_coef_A = _cfg("softmax_coef_A", 1.0)
-    softmax_coef_B = _cfg("softmax_coef_B", 0.5)
+    softmax_coef_B = _cfg("softmax_coef_B", 0.0)
+    softmax_coef_C = _cfg("softmax_coef_C", 0.0)
     
     # ============================================================
     # Step 1: 计算序列级log prob
@@ -539,47 +546,63 @@ def adpo_policy_loss(
     # 这比 scatter 操作更高效，且支持所有 Loss 变体
     
     batch_size = anchored_scores.shape[0]
-    if batch_size % num_generations != 0:
+    
+    # 检查是否有预计算的 q_target
+    q_target_precomputed = kwargs.get("q_target", None)
+    use_precomputed_q = q_target_precomputed is not None
+    
+    # 检查是否有完整的组结构（batch_size 是 num_generations 的整数倍）
+    has_complete_groups = (batch_size % num_generations == 0) and (batch_size >= num_generations)
+    
+    if not has_complete_groups and not use_precomputed_q:
         raise ValueError(f"ADPO requires batch_size divisible by num_generations. Got {batch_size}, {num_generations}")
     
-    num_prompts = batch_size // num_generations
+    num_prompts = batch_size // num_generations if has_complete_groups else 0
     index = kwargs.get("index", None)
-    sorted_idx = None  # Not sure Initialize to avoid potential undefined variable issues
+    sorted_idx = None
     
     if index is not None:
         # Index Mode: Sort by index to group elements physically
-        # Use as_torch_index to handle various index types (int, str/uuid, etc.)
         index_tensor = as_torch_index(index, device=anchored_scores.device)
-            
         sorted_idx = torch.argsort(index_tensor)
         
-        # Reorder inputs to be contiguous groups
-        u_grouped = anchored_scores[sorted_idx].view(num_prompts, num_generations)
-        adv_grouped = advantages[sorted_idx].view(num_prompts, num_generations)
-        
-        # 如果有 precomputed q，也需要排序
-        q_target_precomputed = kwargs.get("q_target", None)
-        if q_target_precomputed is not None:
-            q_grouped = q_target_precomputed[sorted_idx].view(num_prompts, num_generations)
+        if has_complete_groups:
+            # 有完整的组结构，reshape 为 (P, G)
+            u_grouped = anchored_scores[sorted_idx].view(num_prompts, num_generations)
+            adv_grouped = advantages[sorted_idx].view(num_prompts, num_generations)
+            old_log_prob_grouped = seq_old_log_prob[sorted_idx].view(num_prompts, num_generations)
+            if q_target_precomputed is not None:
+                q_grouped = q_target_precomputed[sorted_idx].view(num_prompts, num_generations)
+            else:
+                q_grouped = None
         else:
-            q_grouped = None
+            # 没有完整的组结构（partial batch），保持 flattened (B,)
+            u_grouped = anchored_scores[sorted_idx]
+            adv_grouped = advantages[sorted_idx]
+            old_log_prob_grouped = seq_old_log_prob[sorted_idx]
+            if q_target_precomputed is not None:
+                q_grouped = q_target_precomputed[sorted_idx]
+            else:
+                q_grouped = None
             
-        # 用于后续计算的 old_log_prob (如果需要)
-        old_log_prob_grouped = seq_old_log_prob[sorted_idx].view(num_prompts, num_generations)
-        
     else:
         # Reshape Mode: Assume already grouped
-        u_grouped = anchored_scores.view(num_prompts, num_generations)
-        adv_grouped = advantages.view(num_prompts, num_generations)
-        
-        q_target_precomputed = kwargs.get("q_target", None)
-        if q_target_precomputed is not None:
-            q_grouped = q_target_precomputed.view(num_prompts, num_generations)
+        if has_complete_groups:
+            # 有完整的组结构，reshape 为 (P, G)
+            u_grouped = anchored_scores.view(num_prompts, num_generations)
+            adv_grouped = advantages.view(num_prompts, num_generations)
+            old_log_prob_grouped = seq_old_log_prob.view(num_prompts, num_generations)
+            if q_target_precomputed is not None:
+                q_grouped = q_target_precomputed.view(num_prompts, num_generations)
+            else:
+                q_grouped = None
         else:
-            q_grouped = None
+            # 没有完整的组结构，保持 flattened (B,)
+            u_grouped = anchored_scores
+            adv_grouped = advantages
+            old_log_prob_grouped = seq_old_log_prob
+            q_grouped = q_target_precomputed
             
-        old_log_prob_grouped = seq_old_log_prob.view(num_prompts, num_generations)
-
     # ============================================================
     # Step 5: Compute q_target (if not provided)
     # ============================================================
@@ -588,10 +611,14 @@ def adpo_policy_loss(
         q_grouped = F.softmax(adv_grouped / beta_reward, dim=-1)
 
     # ============================================================
-    # Step 6: Compute Loss (on (P, G) tensors)
+    # Step 6: Compute Loss (on (P, G) tensors or (B,) tensors)
     # ============================================================
     
     if loss_variant == "plackett_luce":
+        # Plackett-Luce 需要完整的组结构来进行 ranking
+        if use_precomputed_q and u_grouped.dim() == 1:
+             raise ValueError("Plackett-Luce loss requires full group structure (P, G), incompatible with partial batches.")
+        
         # Plackett-Luce (ListMLE)
         loss = _compute_plackett_luce_loss(
             u_grouped, 
@@ -609,24 +636,36 @@ def adpo_policy_loss(
         u_center_val = torch.tensor(0.0, device=anchored_scores.device)
         
     else:
-        # Softmax / Scaled / Direct
-        # Apply new formula adjustment: u_new = u - (A-1)·ℓ_ref/τ - B·q/τ
-        if softmax_coef_A != 1.0 or softmax_coef_B != 0.0:
-            u_for_loss = u_grouped - (softmax_coef_A - 1.0) * old_log_prob_grouped / effective_tau - softmax_coef_B * q_grouped.detach() / effective_tau
-        else:
-            u_for_loss = u_grouped
+        # Softmax / Scaled / Direct / Decoupled
+        
+        # 如果是 (B,) 维度的预计算模式，不需要 view 也不需要 mean(dim=-1)
+        is_flattened = u_grouped.dim() == 1
+        
+        # Apply unified formula: u = (log_prob - A·old_log_prob - B·q - C) / tau
+        # 通过调整 A, B, C 实现不同变体
+        
+        # 1. Reconstruct current_log_prob (pi)
+        # u_grouped = (pi - pi_ref) / tau  => pi = u_grouped * tau + pi_ref
+        current_log_prob = u_grouped * effective_tau + old_log_prob_grouped
+        
+        # 2. Compute u_for_loss with coefficients
+        numerator = current_log_prob - softmax_coef_A * old_log_prob_grouped - softmax_coef_B * q_grouped.detach() - softmax_coef_C
+        u_for_loss = numerator / effective_tau
 
         # Q-Weighted Centering
-        # 注意：u_center 必须 detach！否则当 softmax(u_centered) ≈ q 时梯度消失
-        # 数学推导：
-        #   L = -(q·u_centered).sum() + logsumexp(u_centered)
-        #   如果 u_center 不 detach，u_centered = u - u_center，而 u_center = (q·u).sum()
-        #   展开后 -(q·u).sum() + (q·u).sum() = 0，alignment term 被抵消！
-        #   梯度变成 softmax(u_centered)·(I - q^T)，当 softmax ≈ q 时为 0
         if use_q_center:
-            # u_center = sum(q * u, dim=-1)
-            u_center = (q_grouped.detach() * u_for_loss).sum(dim=-1, keepdim=True).detach()  # (P, 1) - MUST detach!
-            u_centered = u_for_loss - u_center
+            # u_center = sum(q * u)
+            # 对于 flattened，这需要按组求和。但如果是 partial batch，我们无法正确计算 u_center。
+            # 这里我们假设如果用了 use_precomputed_q，则意味着我们无法在当前 batch 计算 u_center。
+            # 或者，u_center 应该在预计算阶段计算好传进来？
+            # 暂时禁用 flattened 模式下的 u_center，或者如果不影响梯度的话忽略它
+            if not is_flattened:
+                u_center = (q_grouped.detach() * u_for_loss).sum(dim=-1, keepdim=True).detach()  # (P, 1) - MUST detach!
+                u_centered = u_for_loss - u_center
+            else:
+                # 警告：Partial Batch 无法正确计算 Q-Center，这里跳过 centering
+                u_centered = u_for_loss
+                u_center = torch.zeros_like(u_for_loss)
         else:
             u_centered = u_for_loss
             u_center = torch.zeros_like(u_for_loss)
@@ -636,6 +675,10 @@ def adpo_policy_loss(
         # ============================================================
         # 检查是否有预计算的 p_target（通过 kwargs 传入）
         p_target_precomputed = kwargs.get("p_target", None)
+        # 兼容旧代码：q_target 和 p_target 混用
+        if p_target_precomputed is None and q_target_precomputed is not None:
+             p_target_precomputed = q_target_precomputed
+
         use_delayed_softmax = _cfg("use_delayed_softmax", False)
         
         if loss_variant == "decoupled":
@@ -648,66 +691,83 @@ def adpo_policy_loss(
             # =====================================================
             
             # Term 1: -q * u
-            term1 = -(q_grouped.detach() * u_centered).sum(dim=-1)
-            
-            # Term 2: mean(exp(u))
-            term2 = torch.exp(u_centered).mean(dim=-1)
+            if not is_flattened:
+                term1 = -(q_grouped.detach() * u_centered).sum(dim=-1)
+                term2 = torch.exp(u_centered).mean(dim=-1)
+            else:
+                # Flattened 模式下，q 和 u 都是 (B,)
+                # Loss 是逐样本计算的，最后求 mean
+                # 注意：Decoupled 原公式是 sum(-q*u) + mean(exp(u)) 针对一组
+                # 对于单样本 i: L_i = -q_i * u_i + 1/G * exp(u_i)
+                # 这里的 1/G 系数需要补上
+                term1 = -(q_grouped.detach() * u_centered)
+                term2 = torch.exp(u_centered) / num_generations # 假设 num_generations 是全局常数
             
             loss_per_prompt = term1 + term2
             loss = loss_per_prompt.mean()
             
             # Metrics
-            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
-            term_logsumexp = term2.mean().detach()
-            u_center_val = u_center.mean().detach()
-            
-            # For logging/reg purposes, compute logsumexp
-            log_Z = torch.logsumexp(u_centered, dim=-1)
-
-        elif p_target_precomputed is not None and use_delayed_softmax:
-            # =====================================================
-            # 延迟模式：使用预计算的 p_target
-            # 
-            # 优势：
-            # 1. 不需要 batch_size >= num_generations
-            # 2. 可以在 advantage 计算阶段（所有组成员已收集）预计算 p
-            # 3. 梯度仍然是正确的 (p - q)
-            # 
-            # 使用方法：
-            # 1. 在 compute_adpo_advantages 时同时计算 p_target
-            # 2. 将 p_target 存入 DataProto 并传递给 actor
-            # 3. actor 调用 loss 时传入 p_target=...
-            # =====================================================
-            
-            # 重新排序 p_target 以匹配 u_centered 的顺序
-            if index is not None:
-                p_grouped = p_target_precomputed[sorted_idx].view(num_prompts, num_generations)
+            if not is_flattened:
+                term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+                term_logsumexp = term2.mean().detach()
+                log_Z = torch.logsumexp(u_centered, dim=-1)
             else:
-                p_grouped = p_target_precomputed.view(num_prompts, num_generations)
+                term_alignment = (q_grouped.detach() * u_centered).mean().detach() * num_generations
+                term_logsumexp = term2.mean().detach() * num_generations
+                log_Z = torch.tensor(0.0) # 无法计算组内 logsumexp
             
-            # 使用自定义 autograd function
-            loss = DelayedGroupSoftmaxCE.apply(u_centered, q_grouped.detach(), p_grouped)
-            
-            if loss_variant == "scaled":
-                loss = loss * grad_scale_factor
-            
-            # Metrics（使用预计算的 p）
-            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
-            # p_grouped 已经是 softmax，所以 log_Z ≈ log(sum(exp(u)))
-            with torch.no_grad():
-                log_Z_approx = torch.logsumexp(u_centered.detach(), dim=-1)
-                term_logsumexp = torch.exp(log_Z_approx).mean() / num_generations
             u_center_val = u_center.mean().detach()
-            log_Z = log_Z_approx  # 用于后续的正则化
+
+        elif p_target_precomputed is not None and (use_delayed_softmax or use_precomputed_q):
+            # =====================================================
+            # 预计算 Q 模式
+            # 
+            # 关键修复：当有完整组结构时，实时计算 p = softmax(u)
+            # 而不是使用预计算的 p_target（可能等于 q，导致梯度为 0）
+            # =====================================================
+            
+            if not is_flattened:
+                # 有完整的组结构 (P, G)，可以实时计算 p
+                # 使用标准 Softmax Loss：L = -q·u + logsumexp(u)
+                # 梯度：∂L/∂u = softmax(u) - q = p - q (正确的梯度)
+                log_Z = torch.logsumexp(u_centered, dim=-1)  # (P,)
+                loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
+                loss = loss_per_prompt.mean()
+                
+                if loss_variant == "scaled":
+                    loss = loss * grad_scale_factor
+                
+                # Metrics
+                term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+                term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
+            else:
+                # Flattened 模式 (B,)，无法实时计算组内 softmax
+                # 必须使用 DelayedGroupSoftmaxCE（依赖预计算的 p）
+                # 注意：这种情况下预计算的 p 必须正确，否则梯度会有问题！
+                if index is not None:
+                    p_grouped = p_target_precomputed[sorted_idx]
+                else:
+                    p_grouped = p_target_precomputed
+                
+                loss = DelayedGroupSoftmaxCE.apply(u_centered, q_grouped.detach(), p_grouped)
+                
+                if loss_variant == "scaled":
+                    loss = loss * grad_scale_factor
+                
+                # Metrics (limited in flattened mode)
+                term_alignment = (q_grouped.detach() * u_centered).mean().detach() * num_generations
+                term_logsumexp = torch.tensor(0.0, device=u_centered.device)
+                log_Z = torch.tensor(0.0, device=u_centered.device)
+
+            u_center_val = u_center.mean().detach()
             
         else:
             # =====================================================
             # 标准模式：实时计算 logsumexp（需要组内完整）
-            # 
-            # Loss Calculation: L = -sum(q * u) + logsumexp(u)
-            # 梯度: ∂L/∂u = softmax(u) - q = p - q
             # =====================================================
-            
+            if is_flattened:
+                 raise ValueError("Standard Softmax loss requires full group structure (P, G). Use precomputed q/p for partial batches.")
+
             log_Z = torch.logsumexp(u_centered, dim=-1)  # (P,)
             loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
             loss = loss_per_prompt.mean()

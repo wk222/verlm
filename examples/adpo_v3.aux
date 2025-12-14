@@ -1,0 +1,187 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{Christiano2017RLHF}
+\citation{Ouyang2022InstructGPT}
+\citation{Rafailov2023DPO}
+\citation{Schulman2015TRPO}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Contributions.}{1}{section*.1}\protected@file@percent }
+\citation{Christiano2017RLHF}
+\citation{Ouyang2022InstructGPT}
+\citation{Stiennon2020Summary}
+\citation{Rafailov2023DPO}
+\citation{Azar2024IPO}
+\citation{Xu2024CPO}
+\citation{Plackett1975}
+\citation{Luce1959}
+\citation{Zhao2023SLiC}
+\citation{Dong2023RAFT}
+\citation{Schulman2015TRPO}
+\citation{Schulman2017PPO}
+\citation{Hinton2015Distilling}
+\citation{Shao2024GRPO}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\newlabel{sec:related}{{2}{2}{Related Work}{section.2}{}}
+\newlabel{sec:related@cref}{{[section][2][]2}{[1][2][]2}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Anchored Direct Preference Optimization (ADPO)}{2}{section.3}\protected@file@percent }
+\newlabel{sec:adpo}{{3}{2}{Anchored Direct Preference Optimization (ADPO)}{section.3}{}}
+\newlabel{sec:adpo@cref}{{[section][3][]3}{[1][2][]2}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Anchored Logits}{2}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:setting}{{3.1}{2}{Anchored Logits}{subsection.3.1}{}}
+\newlabel{sec:setting@cref}{{[subsection][1][3]3.1}{[1][2][]2}{}{}{}}
+\citation{Rafailov2023DPO}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Unified Objective: From Forward KL to Anchored Cross-Entropy}{3}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:objective}{{3.2}{3}{Unified Objective: From Forward KL to Anchored Cross-Entropy}{subsection.3.2}{}}
+\newlabel{sec:objective@cref}{{[subsection][2][3]3.2}{[1][3][]3}{}{}{}}
+\newlabel{eq:adpo_kl}{{2}{3}{Unified Objective: From Forward KL to Anchored Cross-Entropy}{equation.2}{}}
+\newlabel{eq:adpo_kl@cref}{{[equation][2][]2}{[1][3][]3}{}{}{}}
+\newlabel{eq:adpo_objective}{{3}{3}{Unified Objective: From Forward KL to Anchored Cross-Entropy}{equation.3}{}}
+\newlabel{eq:adpo_objective@cref}{{[equation][3][]3}{[1][3][]3}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Gradient and Optimization.}{3}{section*.2}\protected@file@percent }
+\newlabel{eq:adpo_grad_general}{{4}{3}{Gradient and Optimization}{equation.4}{}}
+\newlabel{eq:adpo_grad_general@cref}{{[equation][4][]4}{[1][3][]3}{}{}{}}
+\newlabel{prop:closed_form}{{3.1}{3}{Closed-form optimum}{theorem.3.1}{}}
+\newlabel{prop:closed_form@cref}{{[theorem][1][3]3.1}{[1][3][]3}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}A Unified Framework}{3}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:unified_framework}{{3.3}{3}{A Unified Framework}{subsection.3.3}{}}
+\newlabel{sec:unified_framework@cref}{{[subsection][3][3]3.3}{[1][3][]3}{}{}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces \textbf  {Unified framework induced by ADPO.} Changing $(q,\pi _{\mathrm  {ref}},\tau _{\mathrm  {anc}})$ recovers well-known paradigms.}}{3}{table.caption.3}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:unified_framework}{{1}{3}{\textbf {Unified framework induced by ADPO.} Changing $(q,\pi _{\mathrm {ref}},\tauanc )$ recovers well-known paradigms}{table.caption.3}{}}
+\newlabel{tab:unified_framework@cref}{{[table][1][]1}{[1][3][]3}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Theoretical Analysis}{4}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:theory}{{3.4}{4}{Theoretical Analysis}{subsection.3.4}{}}
+\newlabel{sec:theory@cref}{{[subsection][4][3]3.4}{[1][4][]4}{}{}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.4.1}Implicit Trust Region via Curvature Scaling}{4}{subsubsection.3.4.1}\protected@file@percent }
+\newlabel{sec:geometry}{{3.4.1}{4}{Implicit Trust Region via Curvature Scaling}{subsubsection.3.4.1}{}}
+\newlabel{sec:geometry@cref}{{[subsubsection][1][3,4]3.4.1}{[1][4][]4}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {Implicit trust region via curvature scaling.} The Fisher metric $\Diag  (q)-qq^\top $ defines a quadratic bowl in anchored coordinates $u=(\ell -\ell ^{\mathrm  {ref}})/\tau _{\mathrm  {anc}}$. Smaller $\tau _{\mathrm  {anc}}$ yields sharper curvature ($\propto 1/\tau _{\mathrm  {anc}}^2$), confining updates near the anchor and creating an implicit trust region.}}{4}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:anchored_bowl}{{1}{4}{\textbf {Implicit trust region via curvature scaling.} The Fisher metric $\Diag (q)-qq^\top $ defines a quadratic bowl in anchored coordinates $u=(\ell -\ell ^{\mathrm {ref}})/\tauanc $. Smaller $\tauanc $ yields sharper curvature ($\propto 1/\tauanc ^2$), confining updates near the anchor and creating an implicit trust region}{figure.caption.4}{}}
+\newlabel{fig:anchored_bowl@cref}{{[figure][1][]1}{[1][4][]4}{}{}{}}
+\citation{Abdolmaleki2018MPO}
+\citation{Murphy2012}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.4.2}Forward KL: Stability without Forgetting}{5}{subsubsection.3.4.2}\protected@file@percent }
+\newlabel{sec:forward_kl}{{3.4.2}{5}{Forward KL: Stability without Forgetting}{subsubsection.3.4.2}{}}
+\newlabel{sec:forward_kl@cref}{{[subsubsection][2][3,4]3.4.2}{[1][4][]5}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces \textbf  {Comparison of policy optimization dynamics.} Gray fill: prior knowledge; dashed line: target distribution. \textbf  {(1) SFT} (Forward KL) suffers probability smearing (over-generalization) to cover the target support. \textbf  {(2) Standard RL} (Reverse KL) is mode-seeking and overly sharp. \textbf  {(3) ADPO} leverages multiplicative anchoring ($\pi _{\mathrm  {ref}} \cdot q^{\tau _{\mathrm  {anc}}}$) to maintain precision while ensuring coverage.}}{5}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:policy_dynamics}{{2}{5}{\textbf {Comparison of policy optimization dynamics.} Gray fill: prior knowledge; dashed line: target distribution. \textbf {(1) SFT} (Forward KL) suffers probability smearing (over-generalization) to cover the target support. \textbf {(2) Standard RL} (Reverse KL) is mode-seeking and overly sharp. \textbf {(3) ADPO} leverages multiplicative anchoring ($\pi _{\mathrm {ref}} \cdot q^{\tauanc }$) to maintain precision while ensuring coverage}{figure.caption.5}{}}
+\newlabel{fig:policy_dynamics@cref}{{[figure][2][]2}{[1][4][]5}{}{}{}}
+\newlabel{rem:maxent}{{3.2}{5}{Relation to MaxEnt RL}{theorem.3.2}{}}
+\newlabel{rem:maxent@cref}{{[theorem][2][3]3.2}{[1][5][]5}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Balancing Coverage and Precision.}{5}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Adaptive Temperature for Online RL}{6}{subsection.3.5}\protected@file@percent }
+\newlabel{sec:adaptive_temperature}{{3.5}{6}{Adaptive Temperature for Online RL}{subsection.3.5}{}}
+\newlabel{sec:adaptive_temperature@cref}{{[subsection][5][3]3.5}{[1][6][]6}{}{}{}}
+\newlabel{eq:smooth_hybrid}{{8}{6}{Adaptive Temperature for Online RL}{equation.8}{}}
+\newlabel{eq:smooth_hybrid@cref}{{[equation][8][]8}{[1][6][]6}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Anchor Strategies and Practical Guidance}{6}{subsection.3.6}\protected@file@percent }
+\newlabel{sec:anchor_strategies}{{3.6}{6}{Anchor Strategies and Practical Guidance}{subsection.3.6}{}}
+\newlabel{sec:anchor_strategies@cref}{{[subsection][6][3]3.6}{[1][6][]6}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7}Algorithm and Implementation}{7}{subsection.3.7}\protected@file@percent }
+\newlabel{sec:algorithm_implementation}{{3.7}{7}{Algorithm and Implementation}{subsection.3.7}{}}
+\newlabel{sec:algorithm_implementation@cref}{{[subsection][7][3]3.7}{[1][6][]7}{}{}{}}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces ADPO (Unified): Online RL and Offline Preference Learning}}{7}{algorithm.1}\protected@file@percent }
+\newlabel{alg:adpo_unified}{{1}{7}{ADPO (Unified): Online RL and Offline Preference Learning}{algorithm.1}{}}
+\newlabel{alg:adpo_unified@cref}{{[algorithm][1][]1}{[1][6][]7}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Experiments}{7}{section.4}\protected@file@percent }
+\newlabel{sec:experiments}{{4}{7}{Experiments}{section.4}{}}
+\newlabel{sec:experiments@cref}{{[section][4][]4}{[1][7][]7}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Contextual Bandits: Robustness and Scaling}{7}{subsection.4.1}\protected@file@percent }
+\newlabel{fig:sub_robustness}{{3a}{9}{Robustness across 12 noisy scenarios}{figure.caption.7}{}}
+\newlabel{fig:sub_robustness@cref}{{[subfigure][1][3]3a}{[1][7][]9}{}{}{}}
+\newlabel{sub@fig:sub_robustness}{{a}{9}{Robustness across 12 noisy scenarios}{figure.caption.7}{}}
+\newlabel{sub@fig:sub_robustness@cref}{{[subfigure][1][3]3a}{[1][7][]9}{}{}{}}
+\newlabel{fig:sub_scaling}{{3b}{9}{Scaling with model capacity}{figure.caption.7}{}}
+\newlabel{fig:sub_scaling@cref}{{[subfigure][2][3]3b}{[1][7][]9}{}{}{}}
+\newlabel{sub@fig:sub_scaling}{{b}{9}{Scaling with model capacity}{figure.caption.7}{}}
+\newlabel{sub@fig:sub_scaling@cref}{{[subfigure][2][3]3b}{[1][7][]9}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \textbf  {Robustness and scaling comparison.} \textbf  {(a)} Performance across 12 noisy contextual bandit scenarios. TRPO (pink) achieves highest WinMass in 8/12 settings via explicit KL regularization. ADPO Listwise-Raw (green dashed) excels under distribution shift and adversarial corruption. \textbf  {(b)} Model scaling on Heavy Noise-Medium. TRPO and ADPO benefit from larger capacity, while PPO degrades at large scale.}}{9}{figure.caption.7}\protected@file@percent }
+\newlabel{fig:merged_results}{{3}{9}{\textbf {Robustness and scaling comparison.} \textbf {(a)} Performance across 12 noisy contextual bandit scenarios. TRPO (pink) achieves highest WinMass in 8/12 settings via explicit KL regularization. ADPO Listwise-Raw (green dashed) excels under distribution shift and adversarial corruption. \textbf {(b)} Model scaling on Heavy Noise-Medium. TRPO and ADPO benefit from larger capacity, while PPO degrades at large scale}{figure.caption.7}{}}
+\newlabel{fig:merged_results@cref}{{[figure][3][]3}{[1][7][]9}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Result 1: Robustness to Noisy Preferences.}{9}{section*.8}\protected@file@percent }
+\citation{Shao2024GRPO}
+\@writefile{toc}{\contentsline {paragraph}{Result 2: Impact of Model Capacity.}{10}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Precision in Offline Distillation}{10}{subsection.4.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces \textbf  {Policy distillation on continuous control (MuJoCo).} Results averaged over 5 seeds. ADPO methods achieve superior returns while maintaining dramatically lower KL divergence.}}{10}{table.caption.10}\protected@file@percent }
+\newlabel{tab:distillation_continuous}{{2}{10}{\textbf {Policy distillation on continuous control (MuJoCo).} Results averaged over 5 seeds. ADPO methods achieve superior returns while maintaining dramatically lower KL divergence}{table.caption.10}{}}
+\newlabel{tab:distillation_continuous@cref}{{[table][2][]2}{[1][10][]10}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Scalability to Reasoning with LLMs}{10}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Reward Function.}{10}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Training Configuration.}{11}{section*.12}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \textbf  {ADPO vs GRPO on Qwen3-1.7B (\textsc  {math-lighteval} Level 3--4).} \textbf  {(a)} Training reward. GRPO collapses around step 40 (reward $\to 0$), while ADPO reaches 0.89 peak reward. \textbf  {(b)} Completion length. GRPO's length drops then saturates at 1024 (degenerate outputs); ADPO maintains stable lengths around 1000--1200 tokens.}}{11}{figure.caption.13}\protected@file@percent }
+\newlabel{fig:wandb_llm}{{4}{11}{\textbf {ADPO vs GRPO on Qwen3-1.7B (\textsc {math-lighteval} Level 3--4).} \textbf {(a)} Training reward. GRPO collapses around step 40 (reward $\to 0$), while ADPO reaches 0.89 peak reward. \textbf {(b)} Completion length. GRPO's length drops then saturates at 1024 (degenerate outputs); ADPO maintains stable lengths around 1000--1200 tokens}{figure.caption.13}{}}
+\newlabel{fig:wandb_llm@cref}{{[figure][4][]4}{[1][10][]11}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Results.}{11}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Discussion and Limitations}{11}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Forward KL as a design choice.}{11}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Decoupling target and anchor.}{11}{section*.16}\protected@file@percent }
+\citation{Amari1998NaturalGradient}
+\bibcite{Rafailov2023DPO}{1}
+\bibcite{Murphy2012}{2}
+\bibcite{Christiano2017RLHF}{3}
+\bibcite{Ouyang2022InstructGPT}{4}
+\@writefile{toc}{\contentsline {paragraph}{Curvature scaling vs explicit constraints.}{12}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Limitations.}{12}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Conclusion}{12}{section.6}\protected@file@percent }
+\bibcite{Schulman2017PPO}{5}
+\bibcite{Azar2024IPO}{6}
+\bibcite{Xu2024CPO}{7}
+\bibcite{Rosset2024OnlineDPO}{8}
+\bibcite{BradleyTerry1952}{9}
+\bibcite{Plackett1975}{10}
+\bibcite{Luce1959}{11}
+\bibcite{Zhao2023SLiC}{12}
+\bibcite{Dong2023RAFT}{13}
+\bibcite{Xiong2024ListwiseDPO}{14}
+\bibcite{Casper2023RLHF_Survey}{15}
+\bibcite{Stiennon2020Summary}{16}
+\bibcite{Gleave2022Uncertainty}{17}
+\bibcite{Zhu2023RobustRLHF}{18}
+\bibcite{Pan2025PO}{19}
+\bibcite{Ziebart2008MaxEnt}{20}
+\bibcite{Haarnoja2018SAC}{21}
+\bibcite{Haarnoja2017SAC}{22}
+\bibcite{Hinton2015Distilling}{23}
+\bibcite{Schulman2015TRPO}{24}
+\bibcite{Peng2019AWR}{25}
+\bibcite{Nair2020AWAC}{26}
+\bibcite{Abdolmaleki2018MPO}{27}
+\bibcite{Amari1998NaturalGradient}{28}
+\bibcite{Nesterov2004Convex}{29}
+\bibcite{Shao2024GRPO}{30}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Fisher Geometry and the Implicit Trust Region}{15}{appendix.A}\protected@file@percent }
+\newlabel{app:fisher_geometry_v3}{{A}{15}{Fisher Geometry and the Implicit Trust Region}{appendix.A}{}}
+\newlabel{app:fisher_geometry_v3@cref}{{[section][1][]A}{[1][15][]15}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}Bregman View and Local Quadratic Form}{15}{subsection.A.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Translation Invariance and Implicit Projection}{15}{subsection.A.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Temperature as Trust-Region Radius}{15}{subsection.A.3}\protected@file@percent }
+\citation{Abdolmaleki2018MPO}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.4}Forward KL vs.\ Reverse KL: Mode-Seeking vs.\ Mean-Seeking}{16}{subsection.A.4}\protected@file@percent }
+\newlabel{app:forward_reverse_kl}{{A.4}{16}{Forward KL vs.\ Reverse KL: Mode-Seeking vs.\ Mean-Seeking}{subsection.A.4}{}}
+\newlabel{app:forward_reverse_kl@cref}{{[subsection][4][1]A.4}{[1][15][]16}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {B}Theoretical Connections to Reinforcement Learning}{16}{appendix.B}\protected@file@percent }
+\newlabel{app:connection_to_rl}{{B}{16}{Theoretical Connections to Reinforcement Learning}{appendix.B}{}}
+\newlabel{app:connection_to_rl@cref}{{[section][2][]B}{[1][16][]16}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.1}Connection to Offline RL (AWR/AWAC/MPO)}{16}{subsection.B.1}\protected@file@percent }
+\newlabel{app:awr_connection_v3}{{B.1}{16}{Connection to Offline RL (AWR/AWAC/MPO)}{subsection.B.1}{}}
+\newlabel{app:awr_connection_v3@cref}{{[subsection][1][2]B.1}{[1][16][]16}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.2}Theoretical Connection to PPO (Reverse-ADPO Analysis)}{16}{subsection.B.2}\protected@file@percent }
+\newlabel{app:connection_to_ppo}{{B.2}{16}{Theoretical Connection to PPO (Reverse-ADPO Analysis)}{subsection.B.2}{}}
+\newlabel{app:connection_to_ppo@cref}{{[subsection][2][2]B.2}{[1][16][]16}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Equivalence to Entropy-Regularized RL.}{16}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Gradient Dynamics: Anchoring vs. Clipping.}{17}{section*.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {C}Proof of Proposition 3.1 (Closed-Form Optimum)}{17}{appendix.C}\protected@file@percent }
+\newlabel{app:proof_closed_form}{{C}{17}{Proof of Proposition 3.1 (Closed-Form Optimum)}{appendix.C}{}}
+\newlabel{app:proof_closed_form@cref}{{[section][3][]C}{[1][17][]17}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {D}Derivation: ADPO to DPO}{17}{appendix.D}\protected@file@percent }
+\newlabel{app:adpo_to_dpo_v3}{{D}{17}{Derivation: ADPO to DPO}{appendix.D}{}}
+\newlabel{app:adpo_to_dpo_v3@cref}{{[section][4][]D}{[1][17][]17}{}{}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Geometric comparison among KD, TRPO, and ADPO.}}{18}{table.caption.22}\protected@file@percent }
+\newlabel{tab:kd_trpo_adpo_v3}{{3}{18}{Geometric comparison among KD, TRPO, and ADPO}{table.caption.22}{}}
+\newlabel{tab:kd_trpo_adpo_v3@cref}{{[table][3][]3}{[1][17][]18}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {E}Relation to KD and TRPO (Geometric View)}{18}{appendix.E}\protected@file@percent }
+\newlabel{app:kd_trpo_v3}{{E}{18}{Relation to KD and TRPO (Geometric View)}{appendix.E}{}}
+\newlabel{app:kd_trpo_v3@cref}{{[section][5][]E}{[1][17][]18}{}{}{}}
+\gdef \@abspage@last{18}

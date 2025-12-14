@@ -1,5 +1,5 @@
 # ADPO Training Configuration - Qwen3 on WZX MATH Dataset (4x RTX 4090, 24GB)
-# Plackett-Luce loss, 16 generations per prompt
+# Plackett-Luce loss, 6 generations per prompt (Aligned with Softmax/Decoupled)
 
 # Specify default configs from base templates
 defaults:
@@ -23,8 +23,8 @@ data:
   prompt_key: prompt
   max_prompt_length: 1024
   max_response_length: 1280
-  train_batch_size: 32          # divisible by 16 generations -> 2 prompts per mini-batch per GPU effective
-  val_batch_size: 32
+  train_batch_size: 48          # 48 prompts * 6 gens = 288 samples total.
+  val_batch_size: 24
   truncation: left
   shuffle: true
   dataloader_num_workers: 0
@@ -43,14 +43,39 @@ actor_rollout_ref:
     use_remove_padding: True
   actor:
     strategy: fsdp2
-    ppo_mini_batch_size: 32       # keep small for 24GB GPUs
+    ppo_mini_batch_size: 24       # Half of train_batch_size
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 4  # per-GPU micro batch; 4*4GPUs=16 samples per step
+    ppo_micro_batch_size_per_gpu: 6  # 6 * 4 GPUs = 24 samples per step. Fits VRAM.
     use_dynamic_bsz: False
     use_kl_loss: False
     policy_loss:
       loss_mode: adpo
-      num_generations: 16
+      num_generations: 6
+      
+      # ADPO Loss Params
+      loss_variant: plackett_luce
+      pl_top_k: 6
+      pl_temperature: 1.0
+      pl_label_smoothing: 0.1
+      use_poly_loss: True
+      poly_epsilon: 1.0
+      
+      # Common Params
+      tau: 0.1
+      beta_reward: 0.2
+      clip_anchored_score: 10.0
+      clip_log_ratio: 5.0
+      use_length_normalization: True
+      grad_scale_factor: 20.0
+      logit_reg_coef: 0.01
+      use_q_center: True
+      use_adaptive_tau: True
+      adaptive_tau_alpha: 0.2
+      adaptive_tau_beta: 0.5
+      adaptive_tau_min: 0.2
+      adaptive_tau_max: 1.5
+      vocab_size: 151936
+      grad_clip_value: 0.0          # Changed from 16 to 6
     optim:
       lr: 1e-6
     fsdp_config:
@@ -66,12 +91,12 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    n: 16                          # 16 generations per prompt
-    gpu_memory_utilization: 0.5    # conservative for 24GB cards
+    n: 6                          # Changed from 16 to 6
+    gpu_memory_utilization: 0.55  # Increased slightly as per Softmax config
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 8   # conservative for 24GB
-    max_num_seqs: 128              # 32 prompts *16 gens =512 total; 128 *4 GPUs =512, fits exactly
+    log_prob_micro_batch_size_per_gpu: 32   # Increased for better throughput
+    max_num_seqs: 256             # Increased from 128
     ignore_eos: False
     enforce_eager: False
     enable_chunked_prefill: True
@@ -82,7 +107,7 @@ actor_rollout_ref:
 # Algorithm configuration for ADPO
 algorithm:
   adv_estimator: adpo
-  num_generations: 16
+  num_generations: 6              # Changed from 16 to 6
   gamma: 1.0
   lam: 1.0
   use_kl_in_reward: False
@@ -90,22 +115,20 @@ algorithm:
     type: fixed
     kl_coef: 0.0
 
-  # ============================================================
   # ADPO Core Hyperparameters - Plackett-Luce
-  # ============================================================
   loss_variant: plackett_luce
-  tau: 0.1                        # P-L 梯度较强，保持较低 tau 提升排序信号
-  beta_reward: 0.2                # 略尖锐的 q_target 分布
+  tau: 0.1
+  beta_reward: 0.2
   clip_anchored_score: 10.0
   clip_log_ratio: 5.0
   use_length_normalization: True
   grad_scale_factor: 20.0
   logit_reg_coef: 0.01
-  use_q_center: True              # 保持以消除平移不变性
+  use_q_center: True
 
   # Plackett-Luce 稳定性参数
   pl_label_smoothing: 0.1
-  pl_top_k: 8                     # 关注前半部分，削弱尾部噪声
+  pl_top_k: 6                     # Adjusted to match num_generations (was 8)
   pl_temperature: 1.0
   use_poly_loss: True
   poly_epsilon: 1.0
@@ -126,7 +149,7 @@ algorithm:
   grad_clip_value: 0.0
 
   # Advantage Estimation
-  scale_rewards: False            # P-L 通常不需要标准化 rewards
+  scale_rewards: False
   drop_all_failed_prompts: False
 
   # Gradient Accumulation
@@ -135,8 +158,8 @@ algorithm:
 # Trainer configuration
 trainer:
   total_epochs: 2
-  project_name: ADPO-P-L
-  experiment_name: qwen3-1.7b-adpo-pl16-4x4090
+  project_name: ADPO-GSPO-WZX
+  experiment_name: qwen3-1.7b-adpo-pl6-4x4090   # Updated name
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
@@ -166,11 +189,11 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: true
-  hub_model_id: wzx111/Qwen3-1.7B-ADPO-pl16
+  hub_model_id: wzx111/Qwen3-1.7B-ADPO-pl6
   hub_private: true
   hub_final_upload: true
   hub_push_each_epoch: true
-  hub_commit_message: "VERL ADPO P-L checkpoint"
+  hub_commit_message: "VERL ADPO P-L checkpoint (6 gen)"
 
 # Custom reward function
 custom_reward_function:
@@ -185,23 +208,23 @@ custom_reward_function:
     repetition_threshold: 0.3
     repetition_threshold_penalty: -0.5
 
-# Reward model configuration (disabled for ADPO)
+# Reward model configuration
 reward_model:
   enable: False
 
 # WandB logging configuration
 wandb_config:
-  project: ADPO-P-L
+  project: ADPO-GSPO-WZX
   entity: null
-  name: qwen3-1.7b-adpo-pl16-4x4090
-  group: qwen3_adpo
+  name: qwen3-1.7b-adpo-pl6-4x4090
+  group: qwen3_adpo_ab_test
   tags:
     - adpo
     - plackett_luce
     - qwen3
     - math
     - rtx4090
-    - 16gen
+    - 6gen
 
 # Ray distributed computing configuration
 ray_kwargs:

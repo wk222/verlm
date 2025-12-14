@@ -162,7 +162,7 @@ algorithm:
 # Trainer configuration
 trainer:
   total_epochs: 2  # 与 GSPO 保持一致
-  project_name: open-r1-ADPO
+  project_name: ADPO-GSPO-WZX
   experiment_name: qwen3-1.7b-adpo-baseline
   logger: ['wandb', 'console']
   nnodes: 1
@@ -219,7 +219,7 @@ reward_model:
 
 # WandB logging configuration
 wandb_config:
-  project: open-r1-ADPO
+  project: ADPO-GSPO-WZX
   entity: null
   name: qwen3-1.7b-adpo-baseline
   group: qwen3_adpo
