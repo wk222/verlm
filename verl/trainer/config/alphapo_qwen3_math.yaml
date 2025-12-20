@@ -49,8 +49,8 @@ actor_rollout_ref:
     # ppo_mini_batch_size should be divisible by num_generations (4)
     ppo_mini_batch_size: 32  # Reduced from 64
     ppo_micro_batch_size: null
-    # 6 samples per GPU, 4 GPUs = 24 samples/micro-batch
-    # With partial batch support, this can be < num_generations
+    # Micro batch size per GPU. Can be any value now that partial batch is supported.
+    # AlphaPO will use Uniform approximation for p when micro_batch < num_generations.
     ppo_micro_batch_size_per_gpu: 6
     # Note: ppo_epochs=1 is recommended for ADPO/AlphaPO
     # Unlike PPO, ADPO doesn't benefit from multiple epochs on the same data
@@ -120,7 +120,12 @@ algorithm:
   use_length_normalization: True
   grad_scale_factor: 20.0
   logit_reg_coef: 0.01
-  use_q_center: True
+  use_q_center: False
+  
+  # Advantage-weighted score
+  # Set to 0.0 to allow natural gradient tension between anchor and target
+  # If p follows anchor (u=0) and q follows advantage, then p != q, providing gradients.
+  adv_score_weight: 0.0
   
   use_adaptive_tau: True
   adaptive_tau_alpha: 0.2

@@ -548,7 +548,11 @@ def adpo_policy_loss(
     # ============================================================
     # Step 3: 计算anchored scores
     # ============================================================
-    anchored_scores = log_ratio / effective_tau  # (B,) 全程 GPU 计算
+    # u = log_ratio / τ
+    # log_ratio = log(pi) - log(pi_ref)
+    # anchored_scores represents the deviation from the reference model
+    
+    anchored_scores = log_ratio / effective_tau
     
     if clip_anchored_score > 0:
         anchored_scores = torch.clamp(anchored_scores, -clip_anchored_score, clip_anchored_score)
@@ -780,37 +784,70 @@ def adpo_policy_loss(
             alpha = effective_alpha
             eps = 1e-10
             
-            # Detect on-policy case: log_ratio ≈ 0
-            # This happens when old_log_prob = log_prob.detach()
-            # Use relative threshold for numerical stability
+            # Detect on-policy case: log_ratio ≈ 0 OR u_centered ≈ 0
+            # This happens when:
+            # 1. old_log_prob = log_prob.detach() (on-policy mode)
+            # 2. log_ratio is small due to policy being close to anchor
+            # In either case, u_centered ≈ 0 causes softmax to become uniform,
+            # leading to constant log_p = -log(G) and zero gradients.
             log_ratio_mean = log_ratio.abs().mean()
-            log_ratio_scale = seq_old_log_prob.abs().mean() + 1e-8
-            is_on_policy_case = (log_ratio_mean / log_ratio_scale) < 1e-4
+            u_centered_std = u_centered.std() if has_complete_groups else u_grouped.std()
+            
+            # Check both conditions: log_ratio and u_centered
+            # If u_centered has very low variance, softmax → uniform → zero gradient
+            # Thresholds based on observed values:
+            # - log_ratio_mean ~ 0.001 from first step logs
+            # - anchored_score_std ~ 0.002 from first step logs (without advantage)
+            # 
+            # FIXED: Change to AND condition. Even if log_ratio is small, if u_centered has 
+            # enough variance (e.g. from advantage weighting), we can use standard AlphaPO loss.
+            # Only when BOTH are small do we risk zero gradients.
+            is_on_policy_case = (log_ratio_mean < 0.01) and (u_centered_std < 0.01)
+            
+            if is_on_policy_case:
+                print(f"[AlphaPO] On-policy fix triggered! log_ratio={log_ratio_mean:.6f}, u_std={u_centered_std:.6f}")
             
             if is_flattened:
                 # =====================================================
-                # Partial Batch Mode: Use pre-computed q_target
+                # Partial Batch Mode: Support for micro_batch < num_generations
+                # 
                 # In this mode, we cannot compute softmax(u) because group members
                 # are distributed across different micro-batches.
-                # Instead, we use q_grouped directly as the target distribution.
+                # 
+                # Solution: Use approximation for p in mix_prob calculation.
+                # For ppo_epochs=1 (on-policy), at training start:
+                #   - log_ratio ≈ 0 (policy close to anchor)
+                #   - p = softmax(log_ratio / tau) ≈ Uniform(1/G)
+                #
+                # So we approximate: mix_prob ≈ q^α * Uniform^(1-α) = q^α * (1/G)^(1-α)
+                # This preserves the advantage signal (through q) while being mathematically sound.
                 # =====================================================
                 
                 if q_grouped is None:
                     raise ValueError("AlphaPO partial batch mode requires pre-computed q_target.")
                 
-                # For partial batch, use pre-computed q as approximate p
-                # This is valid when the policy hasn't changed much from the anchor
-                p_approx = q_grouped.detach()  # Use q as approximate p
+                # Check if p_target was pre-computed
+                p_target_precomputed = kwargs.get("p_target", None)
+                
+                if p_target_precomputed is not None:
+                    # Use pre-computed p_target
+                    p_approx = p_target_precomputed[sorted_idx]
+                else:
+                    # Approximate p as Uniform (valid when log_ratio ≈ 0)
+                    # p ≈ 1/G for each sample in the group
+                    p_approx = torch.full_like(q_grouped, 1.0 / num_generations)
                 
                 # Compute mix_prob = q^alpha * p^(1-alpha)
-                mix_prob = torch.pow(q_grouped.detach() + eps, alpha) * torch.pow(p_approx + eps, 1.0 - alpha)
+                # Note: This gives q^α * (1/G)^(1-α), which emphasizes high-advantage samples
+                mix_prob = torch.pow(q_grouped.detach() + eps, alpha) * torch.pow(p_approx.detach() + eps, 1.0 - alpha)
                 
                 # Get seq_log_prob in sorted order
                 seq_log_prob_sorted = seq_log_prob[sorted_idx]
                 
-                # REINFORCE-style loss: weighted sum of log_probs
-                # L = -Σ [mix_prob * seq_log_prob]
-                loss = -(mix_prob.detach() * seq_log_prob_sorted).mean()
+                # AlphaPO-style loss: weighted sum of log_probs
+                # L = -1/α * Σ [mix_prob * seq_log_prob]
+                # Gradient flows through seq_log_prob -> log_prob -> model parameters
+                loss = -(1.0 / alpha) * (mix_prob.detach() * seq_log_prob_sorted).mean()
                 
                 # Metrics (limited in flattened mode)
                 term_alignment = (q_grouped.detach() * u_grouped).mean().detach()
@@ -854,6 +891,29 @@ def adpo_policy_loss(
                     # L = - 1/alpha * sum( mix_prob * log_p )
                     loss_per_prompt = -(1.0 / alpha) * (mix_prob * log_p).sum(dim=-1)
                     loss = loss_per_prompt.mean()
+                    
+                    # DEBUG: Aggressive Gradient Check
+                    print(f"\n[AlphaPO_DEBUG_STEP] loss value: {loss.item()}")
+                    print(f"[AlphaPO_DEBUG_STEP] loss.requires_grad: {loss.requires_grad}")
+                    print(f"[AlphaPO_DEBUG_STEP] loss.grad_fn: {loss.grad_fn}")
+                    
+                    if not loss.requires_grad:
+                        print("!!!!!! LOSS HAS NO GRADIENT - BROKEN CHAIN !!!!!!")
+                        print(f"  log_p.requires_grad={log_p.requires_grad} grad_fn={log_p.grad_fn}")
+                        print(f"  mix_prob.requires_grad={mix_prob.requires_grad}")
+                        print(f"  u_centered.requires_grad={u_centered.requires_grad} grad_fn={u_centered.grad_fn}")
+                        print(f"  u_grouped.requires_grad={u_grouped.requires_grad} grad_fn={u_grouped.grad_fn}")
+                        print(f"  anchored_scores.requires_grad={anchored_scores.requires_grad} grad_fn={anchored_scores.grad_fn}")
+                        print(f"  log_ratio.requires_grad={log_ratio.requires_grad} grad_fn={log_ratio.grad_fn}")
+                        print(f"  log_prob input requires_grad={log_prob.requires_grad} grad_fn={log_prob.grad_fn}")
+                        # Raise error to stop training and force user to see this
+                        # raise RuntimeError("AlphaPO Loss has no gradient! Check logs above.")
+
+                    # Also check if gradient is zero (vanishing)
+                    # We can't check .grad yet, but we can check values
+                    if u_centered.std() < 1e-6:
+                         print(f"!!!!!! u_centered VANISHED: std={u_centered.std().item()} !!!!!!")
+
                 
                 # Metrics
                 term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
@@ -916,6 +976,8 @@ def adpo_policy_loss(
             "adpo/advantage_std": advantages.std().item(),
             "adpo/anchored_score_mean": anchored_scores.mean().item(),
             "adpo/anchored_score_std": anchored_scores.std().item(),
+            "adpo/log_ratio_mean": log_ratio.abs().mean().item(),  # Monitor log_ratio component
+            "adpo/adv_score_weight": adv_score_weight,  # Current weight setting
             "adpo/effective_tau": float(effective_tau.item() if isinstance(effective_tau, torch.Tensor) else effective_tau),
             "adpo/effective_alpha": float(effective_alpha.item() if isinstance(effective_alpha, torch.Tensor) else effective_alpha),
             "adpo/term_alignment": float(term_alignment.item() if isinstance(term_alignment, torch.Tensor) else term_alignment),
