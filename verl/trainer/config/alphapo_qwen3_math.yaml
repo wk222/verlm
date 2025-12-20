@@ -49,10 +49,13 @@ actor_rollout_ref:
     # ppo_mini_batch_size should be divisible by num_generations (4)
     ppo_mini_batch_size: 32  # Reduced from 64
     ppo_micro_batch_size: null
-    # 6 samples per GPU, 4 GPUs = 24 samples per micro-batch pass
+    # 6 samples per GPU, 4 GPUs = 24 samples/micro-batch
     # With partial batch support, this can be < num_generations
     ppo_micro_batch_size_per_gpu: 6
-    ppo_epochs: 2  # More updates per batch (compensates for smaller batch)
+    # Note: ppo_epochs=1 is recommended for ADPO/AlphaPO
+    # Unlike PPO, ADPO doesn't benefit from multiple epochs on the same data
+    # because the anchoring mechanism is designed for single-pass updates
+    ppo_epochs: 1
     use_dynamic_bsz: False
     use_kl_loss: False
     policy_loss:
