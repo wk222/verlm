@@ -63,6 +63,7 @@ class PolicyLossConfig(BaseConfig):
         grad_clip_value (float): Gradient clipping value at loss level.
         softmax_coef_A (float): Coefficient A for Softmax loss variant.
         softmax_coef_B (float): Coefficient B for Softmax loss variant.
+        softmax_coef_C (float): Coefficient C for Softmax loss variant.
         
         # Plackett-Luce Specifics
         pl_top_k (int): Top-K for PL ranking.
@@ -105,7 +106,8 @@ class PolicyLossConfig(BaseConfig):
     vocab_size: int = 32000
     grad_clip_value: float = 0.0
     softmax_coef_A: float = 1.0
-    softmax_coef_B: float = 0.5
+    softmax_coef_B: float = 0.0
+    softmax_coef_C: float = 0.0
     
     # PL Params
     pl_top_k: int = 0
