@@ -1,0 +1,216 @@
+# AlphaPO Training Configuration - Qwen3 on WZX MATH Dataset (Hybrid mode - 4 GPU)
+# Optimized for 4x4090 with ~2K training samples
+# Key changes:
+#   - Reduced train_batch_size from 128 to 32 for more training steps
+#   - Reduced num_generations from 8 to 4 for memory efficiency
+#   - Adjusted mini/micro batch sizes accordingly
+
+defaults:
+  - actor@actor_rollout_ref.actor: dp_actor
+  - data@data: legacy_data
+  - rollout@actor_rollout_ref.rollout: rollout
+  - model@actor_rollout_ref.model: hf_model
+  - critic@critic: dp_critic
+  - reward_model@reward_model: dp_reward_model
+  - algorithm@algorithm.rollout_correction: rollout_correction
+  - _self_
+
+critic:
+  enable: False
+
+data:
+  train_files: $DATA_DIR/train.parquet
+  val_files: $DATA_DIR/train.parquet
+  prompt_key: prompt
+  max_prompt_length: 1024
+  max_response_length: 1280
+  # Reduced from 128 to 32: gives ~62 steps per epoch instead of ~16
+  # More updates = better learning signal
+  train_batch_size: 32
+  val_batch_size: 32
+  truncation: left
+  shuffle: true
+  dataloader_num_workers: 0
+  return_raw_input_ids: False
+  return_raw_chat: False
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: Qwen/Qwen3-1.7B
+    external_lib: null
+    override_config: {}
+    enable_gradient_checkpointing: True
+    enable_activation_offload: False
+    use_remove_padding: True
+  actor:
+    strategy: fsdp2
+    # Total samples per step: train_batch_size × n = 32 × 4 = 128
+    # ppo_mini_batch_size should be divisible by num_generations (4)
+    ppo_mini_batch_size: 32  # Reduced from 64
+    ppo_micro_batch_size: null
+    # 6 samples per GPU, 4 GPUs = 24 samples per micro-batch pass
+    # With partial batch support, this can be < num_generations
+    ppo_micro_batch_size_per_gpu: 6
+    ppo_epochs: 2  # More updates per batch (compensates for smaller batch)
+    use_dynamic_bsz: False
+    use_kl_loss: False
+    policy_loss:
+      loss_mode: adpo
+      # Reduced from 8 to 4: saves memory, faster rollout
+      num_generations: 4
+    optim:
+      lr: 2e-6  # Slightly higher LR for smaller batch
+    fsdp_config:
+      wrap_policy:
+        min_num_params: 0
+      param_offload: False
+      optimizer_offload: False
+      dtype: bfloat16
+      model_dtype: bfloat16
+  rollout:
+    name: vllm
+    mode: sync
+    temperature: 1.0
+    top_k: -1
+    top_p: 1.0
+    # Reduced from 8 to 4: matches num_generations
+    n: 4
+    gpu_memory_utilization: 0.55
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: 16
+    max_num_seqs: 128  # Reduced for smaller batch
+    ignore_eos: False
+    enforce_eager: False
+    enable_chunked_prefill: True
+    enable_prefix_caching: True
+    free_cache_engine: True
+    do_sample: True
+
+
+algorithm:
+  adv_estimator: adpo
+  num_generations: 4  # Must match rollout.n and policy_loss.num_generations
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: False
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+  
+  # ============================================================
+  # AlphaPO Configuration
+  # ============================================================
+  loss_variant: alphapo
+  alpha: 0.9                      # Initial alpha (forward-KL like)
+  
+  # Adaptive Alpha Schedule (Reward + Confidence Guarded)
+  use_adaptive_alpha: True
+  alpha_max: 0.9                  # Start with mode-covering
+  alpha_min: 0.35                 # Target mode-seeking
+  
+  tau: 0.5                        # Anchoring temperature
+  beta_reward: 0.3                # Target distribution sharpness
+  clip_anchored_score: 10.0
+  clip_log_ratio: 5.0
+  use_length_normalization: True
+  grad_scale_factor: 20.0
+  logit_reg_coef: 0.01
+  use_q_center: True
+  
+  use_adaptive_tau: True
+  adaptive_tau_alpha: 0.2
+  adaptive_tau_beta: 0.5
+  adaptive_tau_min: 0.2
+  adaptive_tau_max: 1.5
+  vocab_size: 151936
+  
+  grad_clip_value: 0.0
+  scale_rewards: False
+  drop_all_failed_prompts: False
+  global_batch_size: 32
+
+trainer:
+  total_epochs: 2
+  project_name: ADPO-GSPO-WZX
+  experiment_name: qwen3-1.7b-alphapo-alpha0.5-wzx-4gpu
+  logger: ['wandb', 'console']
+  nnodes: 1
+  n_gpus_per_node: 4
+  save_freq: -1
+  save_each_epoch: true
+  test_freq: -1
+  val_before_train: False
+  seed: 42
+  default_hdfs_dir: null
+  default_local_dir: null
+  device: cuda
+  balance_batch: True
+  total_training_steps: null
+  log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
+  esi_redundant_time: 0
+  resume_mode: auto
+  resume_from_path: null
+  val_only: False
+  critic_warmup: 0
+  del_local_ckpt_after_load: False
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  ray_wait_register_center_timeout: 300
+  use_legacy_worker_impl: auto
+  bf16: True
+  fp16: False
+  push_to_hub: true
+  hub_model_id: wzx111/Qwen3-1.7B-AlphaPO-math
+  hub_private: true
+  hub_final_upload: true
+  hub_push_each_epoch: true
+  hub_commit_message: "VERL AlphaPO checkpoint"
+
+custom_reward_function:
+  path: verl/trainer/adpo/reward.py
+  name: good_accuracy
+  reward_kwargs:
+    ngram_size: 4
+    max_penalty: -0.5
+    penalty_scale_factor: 0.5
+    length_reward_scale: 2000.0
+    length_reward_max: 0.1
+    repetition_threshold: 0.3
+    repetition_threshold_penalty: -0.5
+
+reward_model:
+  enable: False
+
+wandb_config:
+  project: ADPO-GSPO-WZX
+  entity: null
+  name: qwen3-1.7b-alphapo-alpha0.5-wzx-4gpu
+  group: qwen3_alphapo
+  tags:
+    - alphapo
+    - alpha_0.5
+    - qwen3
+    - math
+    - reasoning
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        TOKENIZERS_PARALLELISM: "false"
+        NCCL_DEBUG: "WARN"
+        VLLM_LOGGING_LEVEL: "WARNING"
+    num_cpus: null
+  timeline_json_file: null
+
+transfer_queue:
+  enable: False
+
+global_profiler:
+  tool: none
+  steps: []
+  profile_continuous_steps: false

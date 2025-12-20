@@ -470,9 +470,10 @@ class DataParallelPPOActor(BasePPOActor):
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
                     
-                    # Extract pre-computed q_target and index for ADPO
+                    # Extract pre-computed q_target, index, and sorted_idx for ADPO
                     # This allows ADPO to work with micro_batch_size < num_generations
                     q_target = model_inputs.get("q_target", None)
+                    sorted_idx = model_inputs.get("sorted_idx", None)  # Pre-computed to avoid O(B log B) sort
                     index = micro_batch.non_tensor_batch.get("uid", None) if hasattr(micro_batch, 'non_tensor_batch') else None
 
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
@@ -491,6 +492,7 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_is_weights=rollout_is_weights,
                             q_target=q_target,
+                            sorted_idx=sorted_idx,
                             index=index,
                         )
                     else:
