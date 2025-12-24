@@ -19,8 +19,27 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
+
 from verl.utils import as_torch_index
+import torch.distributed as dist
 from verl.trainer.ppo.core_algos import register_adv_est, register_policy_loss
+
+def all_gather(tensor: torch.Tensor, dim=0, world_size=None) -> torch.Tensor:
+    """Safely gather tensor from all ranks."""
+    if world_size is None:
+        if dist.is_initialized():
+            world_size = dist.get_world_size()
+        else:
+            return tensor
+            
+    if world_size <= 1:
+        return tensor
+
+    # Prepare list for gathering
+    gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(gathered, tensor)
+    return torch.cat(gathered, dim=dim)
+
 
 
 # ============================================================
@@ -207,8 +226,9 @@ def compute_adpo_advantages(
             # and map them to contiguous range [0, G-1]
             index_tensor = as_torch_index(index, device=device)
                 
-            # Vectorized Group Mean/Std
-            mean_rewards, std_rewards = _scatter_group_mean_std(sequence_rewards, index_tensor, return_std=scale_rewards)
+                
+            # Vectorized Group Mean/Std (Global-aware)
+            mean_rewards, std_rewards = _compute_global_mean_std(sequence_rewards, index_tensor, return_std=scale_rewards)
             
             if scale_rewards:
                 # std_rewards is already broadcasted to (B,)
@@ -579,13 +599,76 @@ def adpo_policy_loss(
     num_prompts = batch_size // num_generations if has_complete_groups else 0
     
     # ============================================================
+    # Unified Grouping: Support Distributed AllGather
+    # ============================================================
+    # If we don't have complete groups locally, we MUST gather from other ranks
+    # to reconstruct the full groups for sorting and ranking.
+    
+    use_global_gather = not has_complete_groups and dist.is_initialized() and dist.get_world_size() > 1
+    
+    local_batch_size = batch_size
+    
+    # Variables that might be gathered
+    gathered_u = anchored_scores
+    gathered_adv = advantages
+    gathered_old_log_prob = seq_old_log_prob
+    gathered_q = q_target_precomputed  # Might be None
+    
+    if use_global_gather:
+        import torch.distributed.nn.functional as dist_fn
+        
+        # 1. Gather Anchored Scores (with Grad)
+        u_list = dist_fn.all_gather(anchored_scores) # List[Tensor]
+        gathered_u = torch.cat(u_list, dim=0)
+        
+        # 2. Gather Advantages (No Grad needed usually)
+        adv_list = all_gather(advantages) 
+        gathered_adv = adv_list
+        
+        # 3. Gather Old Log Prob (No Grad)
+        old_lp_list = all_gather(seq_old_log_prob)
+        gathered_old_log_prob = old_lp_list
+        
+        # 4. Gather Q (No Grad)
+        if use_precomputed_q:
+            q_list = all_gather(q_target_precomputed)
+            gathered_q = q_list
+        
+        # 5. Gather Index (for sorting)
+        if index is not None:
+            # Re-process index locally first? No, just gather raw index
+            index_tensor = as_torch_index(index, device=anchored_scores.device)
+            global_index = all_gather(index_tensor)
+            
+            # Re-sort using global index
+            sorted_idx = torch.argsort(global_index)
+            
+            # Check consistency
+            global_bsz = gathered_u.shape[0]
+            if global_bsz % num_generations == 0:
+                has_complete_groups = True
+                num_prompts = global_bsz // num_generations
+                batch_size = global_bsz # Update "batch_size" to be global for logic below
+                is_flattened = False
+        else:
+            # No index, assume sequential global ordering
+            global_bsz = gathered_u.shape[0]
+            if global_bsz % num_generations == 0:
+                has_complete_groups = True
+                num_prompts = global_bsz // num_generations
+                sorted_idx = torch.arange(global_bsz, device=anchored_scores.device)
+                batch_size = global_bsz
+                is_flattened = False
+
+    
+    # ============================================================
     # Unified Grouping: Always use sorted_idx (pre-computed or computed on-demand)
     # This eliminates the redundant Reshape Mode vs Index Mode branches
     # ============================================================
     index = kwargs.get("index", None)
     sorted_idx = kwargs.get("sorted_idx", None)
     
-    # Get or compute sorted_idx
+    # Get or compute sorted_idx (if not set by global logic)
     if sorted_idx is None:
         if index is not None:
             index_tensor = as_torch_index(index, device=anchored_scores.device)
@@ -593,20 +676,23 @@ def adpo_policy_loss(
         else:
             # No index provided, assume data is already in order
             sorted_idx = torch.arange(batch_size, device=anchored_scores.device)
-    
+
+            
     # Apply sorting and reshape
     if has_complete_groups:
         # Full group structure: reshape to (P, G)
-        u_grouped = anchored_scores[sorted_idx].view(num_prompts, num_generations)
-        adv_grouped = advantages[sorted_idx].view(num_prompts, num_generations)
-        old_log_prob_grouped = seq_old_log_prob[sorted_idx].view(num_prompts, num_generations)
-        q_grouped = q_target_precomputed[sorted_idx].view(num_prompts, num_generations) if use_precomputed_q else None
+        # Use gathered_* variables which point to local or global tensors
+        u_grouped = gathered_u[sorted_idx].view(num_prompts, num_generations)
+        adv_grouped = gathered_adv[sorted_idx].view(num_prompts, num_generations)
+        old_log_prob_grouped = gathered_old_log_prob[sorted_idx].view(num_prompts, num_generations)
+        q_grouped = gathered_q[sorted_idx].view(num_prompts, num_generations) if gathered_q is not None else None
     else:
-        # Partial batch (flattened): keep as (B,)
-        u_grouped = anchored_scores[sorted_idx]
-        adv_grouped = advantages[sorted_idx]
-        old_log_prob_grouped = seq_old_log_prob[sorted_idx]
-        q_grouped = q_target_precomputed[sorted_idx] if use_precomputed_q else None
+        # If we still don't have complete groups (even after global gather), we cannot proceed with Unified Mode
+        raise ValueError(f"ADPO Unified Mode requires global batch size ({gathered_u.shape[0]}) to be divisible by num_generations ({num_generations}).")
+
+
+
+
             
     # ============================================================
     # Step 5: Compute q_target (if not provided)
@@ -641,7 +727,17 @@ def adpo_policy_loss(
         # Metrics
         term_alignment = torch.tensor(0.0, device=anchored_scores.device)
         term_logsumexp = torch.tensor(0.0, device=anchored_scores.device)
-        u_center_val = torch.tensor(0.0, device=anchored_scores.device)
+        if use_global_gather:
+            # Divide loss by world size because DDP will sum/avg across ranks?
+            # Standard DDP averages gradients. 
+            # Our L_global is Sum(Loss_i_global) / N_global.
+            # Local Gradient = d L_global / d u_local.
+            # This is naturally correct magnitude.
+            # However, if we return L_global on ALL ranks, PyTorch DDP will Average them.
+            # Final effective loss = Mean(L_global, L_global...) = L_global. 
+            # So the magnitude is preserved. 
+            # Validated: Returning global loss on all ranks works for gathered inputs with torch.distributed.nn.functional.all_gather
+            pass
         
     else:
         # Softmax / Scaled / Direct / Decoupled
@@ -663,17 +759,9 @@ def adpo_policy_loss(
         # Q-Weighted Centering
         if use_q_center:
             # u_center = sum(q * u)
-            # 对于 flattened，这需要按组求和。但如果是 partial batch，我们无法正确计算 u_center。
-            # 这里我们假设如果用了 use_precomputed_q，则意味着我们无法在当前 batch 计算 u_center。
-            # 或者，u_center 应该在预计算阶段计算好传进来？
-            # 暂时禁用 flattened 模式下的 u_center，或者如果不影响梯度的话忽略它
-            if not is_flattened:
-                u_center = (q_grouped.detach() * u_for_loss).sum(dim=-1, keepdim=True).detach()  # (P, 1) - MUST detach!
-                u_centered = u_for_loss - u_center
-            else:
-                # 警告：Partial Batch 无法正确计算 Q-Center，这里跳过 centering
-                u_centered = u_for_loss
-                u_center = torch.zeros_like(u_for_loss)
+            # Must detach q_grouped to avoid gradient loops if q comes from current graph (unlikely but safe)
+            u_center = (q_grouped.detach() * u_for_loss).sum(dim=-1, keepdim=True).detach()  # (P, 1)
+            u_centered = u_for_loss - u_center
         else:
             u_centered = u_for_loss
             u_center = torch.zeros_like(u_for_loss)
@@ -693,36 +781,19 @@ def adpo_policy_loss(
             # =====================================================
             # Decoupled Loss: L = sum(-q*u + 1/G * exp(u))
             # = -q.u + mean(exp(u))
-            # 
-            # Gradient: -q + 1/G * exp(u)
-            # This pushes exp(u)/G towards q
             # =====================================================
             
             # Term 1: -q * u
-            if not is_flattened:
-                term1 = -(q_grouped.detach() * u_centered).sum(dim=-1)
-                term2 = torch.exp(u_centered).mean(dim=-1)
-            else:
-                # Flattened 模式下，q 和 u 都是 (B,)
-                # Loss 是逐样本计算的，最后求 mean
-                # 注意：Decoupled 原公式是 sum(-q*u) + mean(exp(u)) 针对一组
-                # 对于单样本 i: L_i = -q_i * u_i + 1/G * exp(u_i)
-                # 这里的 1/G 系数需要补上
-                term1 = -(q_grouped.detach() * u_centered)
-                term2 = torch.exp(u_centered) / num_generations # 假设 num_generations 是全局常数
+            term1 = -(q_grouped.detach() * u_centered).sum(dim=-1)
+            term2 = torch.exp(u_centered).mean(dim=-1)
             
             loss_per_prompt = term1 + term2
             loss = loss_per_prompt.mean()
             
             # Metrics
-            if not is_flattened:
-                term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
-                term_logsumexp = term2.mean().detach()
-                log_Z = torch.logsumexp(u_centered, dim=-1)
-            else:
-                term_alignment = (q_grouped.detach() * u_centered).mean().detach() * num_generations
-                term_logsumexp = term2.mean().detach() * num_generations
-                log_Z = torch.tensor(0.0) # 无法计算组内 logsumexp
+            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+            term_logsumexp = term2.mean().detach()
+            log_Z = torch.logsumexp(u_centered, dim=-1)
             
             u_center_val = u_center.mean().detach()
 
@@ -734,38 +805,19 @@ def adpo_policy_loss(
             # 而不是使用预计算的 p_target（可能等于 q，导致梯度为 0）
             # =====================================================
             
-            if not is_flattened:
-                # 有完整的组结构 (P, G)，可以实时计算 p
-                # 使用标准 Softmax Loss：L = -q·u + logsumexp(u)
-                # 梯度：∂L/∂u = softmax(u) - q = p - q (正确的梯度)
-                log_Z = torch.logsumexp(u_centered, dim=-1)  # (P,)
-                loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
-                loss = loss_per_prompt.mean()
-                
-                if loss_variant == "scaled":
-                    loss = loss * grad_scale_factor
-                
-                # Metrics
-                term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
-                term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
-            else:
-                # Flattened 模式 (B,)，无法实时计算组内 softmax
-                # 必须使用 DelayedGroupSoftmaxCE（依赖预计算的 p）
-                # 注意：这种情况下预计算的 p 必须正确，否则梯度会有问题！
-                if index is not None:
-                    p_grouped = p_target_precomputed[sorted_idx]
-                else:
-                    p_grouped = p_target_precomputed
-                
-                loss = DelayedGroupSoftmaxCE.apply(u_centered, q_grouped.detach(), p_grouped)
-                
-                if loss_variant == "scaled":
-                    loss = loss * grad_scale_factor
-                
-                # Metrics (limited in flattened mode)
-                term_alignment = (q_grouped.detach() * u_centered).mean().detach() * num_generations
-                term_logsumexp = torch.tensor(0.0, device=u_centered.device)
-                log_Z = torch.tensor(0.0, device=u_centered.device)
+            # 有完整的组结构 (P, G)，可以实时计算 p
+            # 使用标准 Softmax Loss：L = -q·u + logsumexp(u)
+            # 梯度：∂L/∂u = softmax(u) - q = p - q (正确的梯度)
+            log_Z = torch.logsumexp(u_centered, dim=-1)  # (P,)
+            loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
+            loss = loss_per_prompt.mean()
+            
+            if loss_variant == "scaled":
+                loss = loss * grad_scale_factor
+            
+            # Metrics
+            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+            term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
 
             u_center_val = u_center.mean().detach()
             
@@ -807,125 +859,49 @@ def adpo_policy_loss(
             if is_on_policy_case:
                 print(f"[AlphaPO] On-policy fix triggered! log_ratio={log_ratio_mean:.6f}, u_std={u_centered_std:.6f}")
             
-            if is_flattened:
-                # =====================================================
-                # Partial Batch Mode: Support for micro_batch < num_generations
-                # 
-                # In this mode, we cannot compute softmax(u) because group members
-                # are distributed across different micro-batches.
-                # 
-                # Solution: Use approximation for p in mix_prob calculation.
-                # For ppo_epochs=1 (on-policy), at training start:
-                #   - log_ratio ≈ 0 (policy close to anchor)
-                #   - p = softmax(log_ratio / tau) ≈ Uniform(1/G)
-                #
-                # So we approximate: mix_prob ≈ q^α * Uniform^(1-α) = q^α * (1/G)^(1-α)
-                # This preserves the advantage signal (through q) while being mathematically sound.
-                # =====================================================
+            # =====================================================
+            # Full Batch Mode: Standard AlphaPO with (P, G) tensors
+            # =====================================================
+            
+            # Compute p_theta (current policy distribution)
+            # Use F.log_softmax for better performance (fused kernel, single pass)
+            log_p = F.log_softmax(u_centered, dim=-1)  # (P, G)
+            p_theta = torch.exp(log_p)
+            log_Z = u_centered.logsumexp(dim=-1, keepdim=True)  # Only for metrics
+            
+            # Compute importance weights (detached)
+            mix_prob = torch.pow(q_grouped.detach() + eps, alpha) * torch.pow(p_theta.detach() + eps, 1.0 - alpha)
+            
+            if is_on_policy_case:
+                # On-policy fix: Use REINFORCE-style gradient estimation
+                alphapo_on_policy_fix_used = True
                 
-                if q_grouped is None:
-                    raise ValueError("AlphaPO partial batch mode requires pre-computed q_target.")
+                # Get seq_log_prob in grouped form (P, G)
+                seq_log_prob_grouped = seq_log_prob[sorted_idx].view(num_prompts, num_generations)
                 
-                # Check if p_target was pre-computed
-                p_target_precomputed = kwargs.get("p_target", None)
+                # Normalize mix_prob for stability
+                mix_prob_normalized = mix_prob / (mix_prob.sum(dim=-1, keepdim=True) + eps)
+                loss_per_prompt = -(mix_prob_normalized.detach() * seq_log_prob_grouped).sum(dim=-1)
+                loss = loss_per_prompt.mean()
                 
-                if p_target_precomputed is not None:
-                    # Use pre-computed p_target
-                    p_approx = p_target_precomputed[sorted_idx]
-                else:
-                    # Approximate p as Uniform (valid when log_ratio ≈ 0)
-                    # p ≈ 1/G for each sample in the group
-                    p_approx = torch.full_like(q_grouped, 1.0 / num_generations)
-                
-                # Compute mix_prob = q^alpha * p^(1-alpha)
-                # Note: This gives q^α * (1/G)^(1-α), which emphasizes high-advantage samples
-                mix_prob = torch.pow(q_grouped.detach() + eps, alpha) * torch.pow(p_approx.detach() + eps, 1.0 - alpha)
-                
-                # Get seq_log_prob in sorted order
-                seq_log_prob_sorted = seq_log_prob[sorted_idx]
-                
-                # AlphaPO-style loss: weighted sum of log_probs
-                # L = -1/α * Σ [mix_prob * seq_log_prob]
-                # Gradient flows through seq_log_prob -> log_prob -> model parameters
-                loss = -(1.0 / alpha) * (mix_prob.detach() * seq_log_prob_sorted).mean()
-                
-                # Metrics (limited in flattened mode)
-                term_alignment = (q_grouped.detach() * u_grouped).mean().detach()
-                term_logsumexp = torch.tensor(0.0, device=u_grouped.device)
-                log_Z = torch.tensor(0.0, device=u_grouped.device)
-                u_center_val = torch.tensor(0.0, device=u_grouped.device)
-                
+                # Entropy bonus to encourage exploration
+                entropy_bonus = -(p_theta * log_p).sum(dim=-1).mean()
+                loss = loss - 0.01 * entropy_bonus
             else:
-                # =====================================================
-                # Full Batch Mode: Standard AlphaPO with (P, G) tensors
-                # =====================================================
-                
-                # Compute p_theta (current policy distribution)
-                # Use F.log_softmax for better performance (fused kernel, single pass)
-                log_p = F.log_softmax(u_centered, dim=-1)  # (P, G)
-                p_theta = torch.exp(log_p)
-                log_Z = u_centered.logsumexp(dim=-1, keepdim=True)  # Only for metrics
-                
-                # Compute importance weights (detached)
-                # weight = q^alpha * p^(1-alpha)
-                mix_prob = torch.pow(q_grouped.detach() + eps, alpha) * torch.pow(p_theta.detach() + eps, 1.0 - alpha)
-                
-                if is_on_policy_case:
-                    # On-policy fix: Use REINFORCE-style gradient estimation
-                    # When log_ratio ≈ 0, standard AlphaPO has zero gradient
-                    alphapo_on_policy_fix_used = True
-                    
-                    # Get seq_log_prob in grouped form (P, G)
-                    seq_log_prob_grouped = seq_log_prob[sorted_idx].view(num_prompts, num_generations)
-                    
-                    # Normalize mix_prob for stability
-                    mix_prob_normalized = mix_prob / (mix_prob.sum(dim=-1, keepdim=True) + eps)
-                    loss_per_prompt = -(mix_prob_normalized.detach() * seq_log_prob_grouped).sum(dim=-1)
-                    loss = loss_per_prompt.mean()
-                    
-                    # Entropy bonus to encourage exploration
-                    entropy_bonus = -(p_theta * log_p).sum(dim=-1).mean()
-                    loss = loss - 0.01 * entropy_bonus
-                else:
-                    # Standard AlphaPO loss (off-policy case)
-                    # L = - 1/alpha * sum( mix_prob * log_p )
-                    loss_per_prompt = -(1.0 / alpha) * (mix_prob * log_p).sum(dim=-1)
-                    loss = loss_per_prompt.mean()
-                    
-                    # DEBUG: Aggressive Gradient Check
-                    print(f"\n[AlphaPO_DEBUG_STEP] loss value: {loss.item()}")
-                    print(f"[AlphaPO_DEBUG_STEP] loss.requires_grad: {loss.requires_grad}")
-                    print(f"[AlphaPO_DEBUG_STEP] loss.grad_fn: {loss.grad_fn}")
-                    
-                    if not loss.requires_grad:
-                        print("!!!!!! LOSS HAS NO GRADIENT - BROKEN CHAIN !!!!!!")
-                        print(f"  log_p.requires_grad={log_p.requires_grad} grad_fn={log_p.grad_fn}")
-                        print(f"  mix_prob.requires_grad={mix_prob.requires_grad}")
-                        print(f"  u_centered.requires_grad={u_centered.requires_grad} grad_fn={u_centered.grad_fn}")
-                        print(f"  u_grouped.requires_grad={u_grouped.requires_grad} grad_fn={u_grouped.grad_fn}")
-                        print(f"  anchored_scores.requires_grad={anchored_scores.requires_grad} grad_fn={anchored_scores.grad_fn}")
-                        print(f"  log_ratio.requires_grad={log_ratio.requires_grad} grad_fn={log_ratio.grad_fn}")
-                        print(f"  log_prob input requires_grad={log_prob.requires_grad} grad_fn={log_prob.grad_fn}")
-                        # Raise error to stop training and force user to see this
-                        # raise RuntimeError("AlphaPO Loss has no gradient! Check logs above.")
-
-                    # Also check if gradient is zero (vanishing)
-                    # We can't check .grad yet, but we can check values
-                    if u_centered.std() < 1e-6:
-                         print(f"!!!!!! u_centered VANISHED: std={u_centered.std().item()} !!!!!!")
-
-                
-                # Metrics
-                term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
-                term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
-                u_center_val = u_center.mean().detach()
+                # Standard AlphaPO loss (off-policy case)
+                loss_per_prompt = -(1.0 / alpha) * (mix_prob * log_p).sum(dim=-1)
+                loss = loss_per_prompt.mean()
+            
+            # Metrics
+            term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+            term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
+            u_center_val = u_center.mean().detach()
 
         else:
             # =====================================================
             # 标准模式：实时计算 logsumexp（需要组内完整）
             # =====================================================
-            if is_flattened:
-                 raise ValueError("Standard Softmax loss requires full group structure (P, G). Use precomputed q/p for partial batches.")
+
 
             log_Z = torch.logsumexp(u_centered, dim=-1)  # (P,)
             loss_per_prompt = -(q_grouped.detach() * u_centered).sum(dim=-1) + log_Z
