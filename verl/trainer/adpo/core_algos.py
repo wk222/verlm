@@ -194,6 +194,37 @@ def _scatter_group_mean_std(values: torch.Tensor, index: torch.Tensor, return_st
     return broadcast_mean, broadcast_std
 
 
+def _compute_global_mean_std(values: torch.Tensor, index: torch.Tensor, return_std: bool = False):
+    """
+    Compute global mean and std of values grouped by index across ALL devices.
+    Ensures that Advantage Normalization uses correct global statistics in distributed training.
+    """
+    if not dist.is_initialized() or dist.get_world_size() <= 1:
+        return _scatter_group_mean_std(values, index, return_std)
+
+    # 1. Gather all values and indices from all ranks
+    global_values = all_gather(values)
+    global_index = all_gather(index)
+    
+    # 2. Compute mean/std on the gathered global data
+    global_mean, global_std = _scatter_group_mean_std(global_values, global_index, return_std)
+    
+    # 3. Slice back to get local part
+    local_size = values.shape[0]
+    rank = dist.get_rank()
+    start = rank * local_size
+    end = start + local_size
+    
+    # Handle uneven batches if any (safety check)
+    if global_mean.shape[0] < end:
+         return _scatter_group_mean_std(values, index, return_std)
+         
+    local_mean = global_mean[start:end]
+    local_std = global_std[start:end] if global_std is not None else None
+    
+    return local_mean, local_std
+
+
 @register_adv_est("adpo")
 def compute_adpo_advantages(
     token_level_rewards: torch.Tensor,
@@ -580,7 +611,7 @@ def adpo_policy_loss(
     # ============================================================
     # Step 4: Prepare Grouped Tensors (Sort & Reshape)
     # ============================================================
-    # 统一处理：无论 Index Mode 还是 Reshape Mode，都整理为 (P, G) 形状
+    #整理为 (P, G) 形状
     # 这比 scatter 操作更高效，且支持所有 Loss 变体
     
     batch_size = anchored_scores.shape[0]
@@ -740,10 +771,9 @@ def adpo_policy_loss(
             pass
         
     else:
-        # Softmax / Scaled / Direct / Decoupled
-        
-        # 如果是 (B,) 维度的预计算模式，不需要 view 也不需要 mean(dim=-1)
-        is_flattened = u_grouped.dim() == 1
+        # Softmax / Scaled / Direct / Decoupled / AlphaPO
+        # 统一使用 (P, G) 结构
+
         
         # Apply unified formula: u = (log_prob - A·old_log_prob - B·q - C) / tau
         # 通过调整 A, B, C 实现不同变体
@@ -843,7 +873,7 @@ def adpo_policy_loss(
             # In either case, u_centered ≈ 0 causes softmax to become uniform,
             # leading to constant log_p = -log(G) and zero gradients.
             log_ratio_mean = log_ratio.abs().mean()
-            u_centered_std = u_centered.std() if has_complete_groups else u_grouped.std()
+            u_centered_std = u_centered.std()
             
             # Check both conditions: log_ratio and u_centered
             # If u_centered has very low variance, softmax → uniform → zero gradient
