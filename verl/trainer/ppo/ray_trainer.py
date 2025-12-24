@@ -266,24 +266,44 @@ def compute_advantage(
         # This allows micro_batch_size < num_generations
         if adv_estimator == "adpo" and "uid" in data.non_tensor_batch:
             import torch.nn.functional as F
-            from collections import defaultdict
+            from verl.utils import as_torch_index
             
             index = data.non_tensor_batch["uid"]
             beta_reward = config.get("beta_reward", 0.5) if config else 0.5
             use_delayed_softmax = config.get("use_delayed_softmax", False) if config else False
+            num_generations = config.get("num_generations", 8) if config else 8
             
-            # Compute softmax within groups
+            # Convert index to tensor and compute sorted_idx (optimization: avoid repeated sorting)
+            index_tensor = as_torch_index(index, device=advantages.device)
+            sorted_idx = torch.argsort(index_tensor)
+            
+            # Store sorted_idx for use in loss calculation (avoids O(B log B) sort per micro-batch)
+            data.batch["sorted_idx"] = sorted_idx
+            
+            # Vectorized q_target computation (faster than loop)
             batch_size = advantages.shape[0]
-            id2indices = defaultdict(list)
-            for i in range(batch_size):
-                id2indices[index[i]].append(i)
-            
-            q_target = torch.zeros_like(advantages)
-            for idx, indices in id2indices.items():
-                indices_tensor = torch.tensor(indices, device=advantages.device, dtype=torch.long)
-                group_adv = advantages[indices_tensor]
-                group_softmax = F.softmax(group_adv / beta_reward, dim=0)
-                q_target[indices_tensor] = group_softmax
+            if batch_size % num_generations == 0:
+                # Full group structure: reshape and use F.softmax
+                num_prompts = batch_size // num_generations
+                adv_sorted = advantages[sorted_idx].view(num_prompts, num_generations)
+                q_sorted = F.softmax(adv_sorted / beta_reward, dim=-1)
+                
+                # Restore original order
+                q_target = torch.zeros_like(advantages)
+                q_target[sorted_idx] = q_sorted.view(-1)
+            else:
+                # Fallback: use scatter for partial batches
+                from collections import defaultdict
+                id2indices = defaultdict(list)
+                for i in range(batch_size):
+                    id2indices[index[i]].append(i)
+                
+                q_target = torch.zeros_like(advantages)
+                for idx, indices in id2indices.items():
+                    indices_tensor = torch.tensor(indices, device=advantages.device, dtype=torch.long)
+                    group_adv = advantages[indices_tensor]
+                    group_softmax = F.softmax(group_adv / beta_reward, dim=0)
+                    q_target[indices_tensor] = group_softmax
             
             data.batch["q_target"] = q_target
             

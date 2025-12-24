@@ -470,14 +470,21 @@ class DataParallelPPOActor(BasePPOActor):
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
                     
-                    # Extract pre-computed q_target and index for ADPO
+                    # Extract pre-computed q_target, index, and sorted_idx for ADPO
                     # This allows ADPO to work with micro_batch_size < num_generations
                     q_target = model_inputs.get("q_target", None)
+                    sorted_idx = model_inputs.get("sorted_idx", None)  # Pre-computed to avoid O(B log B) sort
                     index = micro_batch.non_tensor_batch.get("uid", None) if hasattr(micro_batch, 'non_tensor_batch') else None
 
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
+                    
+                    # DEBUG: Check log_prob before loss computation
+                    print(f"\n[DP_Actor_DEBUG] Before policy_loss_fn:")
+                    print(f"  loss_mode={loss_mode}")
+                    print(f"  log_prob.requires_grad={log_prob.requires_grad}")
+                    print(f"  log_prob.grad_fn={log_prob.grad_fn}")
 
                     # Compute policy loss (any function is expected to return 2 values)
                     # ADPO requires q_target and index; other losses don't
@@ -491,6 +498,7 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_is_weights=rollout_is_weights,
                             q_target=q_target,
+                            sorted_idx=sorted_idx,
                             index=index,
                         )
                     else:
@@ -503,6 +511,13 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_is_weights=rollout_is_weights,
                         )
+                    
+                    # DEBUG: Check pg_loss after loss computation
+                    print(f"[DP_Actor_DEBUG] After policy_loss_fn:")
+                    print(f"  pg_loss={pg_loss.item():.6f}")
+                    print(f"  pg_loss.requires_grad={pg_loss.requires_grad}")
+                    print(f"  pg_loss.grad_fn={pg_loss.grad_fn}")
+                    
                     micro_batch_metrics.update(pg_metrics)
 
                     # Skip if using pure rollout correction mode (metrics already in pg_metrics)
@@ -548,6 +563,23 @@ class DataParallelPPOActor(BasePPOActor):
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
+
+                    # DEBUG: Inspect gradients on parameters
+                    total_norm = 0.0
+                    param_count = 0
+                    grad_count = 0
+                    for p in self.actor_module.parameters():
+                        param_count += 1
+                        if p.grad is not None:
+                            grad_count += 1
+                            total_norm += p.grad.detach().norm().item()
+                    
+                    print(f"\n[Actor_DEBUG_STEP] After backward:")
+                    print(f"  Total params: {param_count}")
+                    print(f"  Params with grad: {grad_count}")
+                    print(f"  Naive Total Norm: {total_norm}")
+                    print(f"  Loss Scale Factor: {loss_scale_factor}")
+                    print(f"  Scaler: {self.scaler.get_scale() if self.scaler else 'None'}")
 
                     micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)

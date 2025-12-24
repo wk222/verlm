@@ -491,50 +491,68 @@ def adpo_policy_loss(
         log_ratio = torch.clamp(log_ratio, -clip_log_ratio, clip_log_ratio)
     
     # ============================================================
-    # Step 2: 自适应温度策略（纯tensor操作，避免.item()同步）
+    # Step 2: 自适应温度 & Alpha 策略
     # ============================================================
-    # 注意：为避免分布式训练中的同步问题，所有计算保持在tensor上
-    # 只在最后输出metrics时才转换为Python值
-    adaptive_debug = None
-    if use_adaptive_tau:
+    adaptive_debug = {}
+    use_adaptive_alpha = _cfg("use_adaptive_alpha", False)
+    alpha_min = _cfg("alpha_min", 0.35)
+    alpha_max = _cfg("alpha_max", 0.9)
+    
+    if use_adaptive_tau or use_adaptive_alpha:
         with torch.no_grad():
             max_entropy = np.log(vocab_size)
             
-            # 使用tensor计算，不调用.item()
+            # 使用tensor计算
             h_static_t = torch.clamp(-seq_old_log_prob.detach() / max_entropy, 0.0, 1.0).mean()
             h_dynamic_t = torch.clamp(-seq_log_prob.detach() / max_entropy, 0.0, 1.0).mean()
             confidence_t = 1.0 - h_dynamic_t
             
-            # 归一化advantage
+            # 归一化advantage (作为局部 improvement 信号)
             adv_min_t = advantages.min()
             adv_max_t = advantages.max()
             adv_range = (adv_max_t - adv_min_t).clamp(min=1e-6)
             r_norm_t = ((advantages - adv_min_t) / adv_range).mean()
             reward_signal_t = 2.0 * r_norm_t - 1.0
+            p_t = torch.clamp(reward_signal_t, min=0.0)
             
-            # 计算温度调节（tensor操作）
-            base_defense_t = adaptive_tau_alpha * h_static_t
-            dynamic_mod_t = adaptive_tau_beta * confidence_t * (-reward_signal_t)
-            tau_mod_t = 1.0 + base_defense_t + dynamic_mod_t
-            effective_tau_t = tau * tau_mod_t
-            effective_tau_t = torch.clamp(effective_tau_t, adaptive_tau_min, adaptive_tau_max)
-            
-            # 优化：保持为 Tensor 参与后续计算，避免 .item() 带来的 CPU-GPU 同步阻塞
-            effective_tau = effective_tau_t
-            
-            # 保存debug信息（保持 Tensor 形式）
+            # 1. 自适应温度
+            if use_adaptive_tau:
+                base_defense_t = adaptive_tau_alpha * h_static_t
+                dynamic_mod_t = adaptive_tau_beta * confidence_t * (-reward_signal_t)
+                tau_mod_t = 1.0 + base_defense_t + dynamic_mod_t
+                effective_tau = torch.clamp(tau * tau_mod_t, adaptive_tau_min, adaptive_tau_max)
+            else:
+                effective_tau = tau
+                tau_mod_t = torch.tensor(1.0, device=advantages.device)
+                
+            # 2. 自适应 Alpha (AlphaPO 专属)
+            if use_adaptive_alpha:
+                # 只有当置信度高且有改进时，才下调 alpha (向 mode-seeking 转换)
+                # alpha_t = alpha_max - (alpha_max - alpha_min) * confidence * improvement
+                alpha_gate = confidence_t * p_t
+                effective_alpha = alpha_max - (alpha_max - alpha_min) * alpha_gate
+            else:
+                effective_alpha = _cfg("alpha", 0.5)
+
+            # 保存debug信息
             adaptive_debug = {
                 "h_static_t": h_static_t, "h_dynamic_t": h_dynamic_t,
                 "confidence_t": confidence_t, "reward_signal_t": reward_signal_t,
-                "tau_mod_t": tau_mod_t
+                "tau_mod_t": tau_mod_t,
+                "effective_alpha": effective_alpha if isinstance(effective_alpha, torch.Tensor) else torch.tensor(effective_alpha, device=advantages.device)
             }
     else:
-        effective_tau = tau  # 保持为 Python float
+        effective_tau = tau
+        effective_alpha = _cfg("alpha", 0.5)
     
     # ============================================================
     # Step 3: 计算anchored scores
     # ============================================================
-    anchored_scores = log_ratio / effective_tau  # (B,) 全程 GPU 计算
+    # u = log_ratio / τ
+    # log_ratio = log(pi) - log(pi_ref)
+    # anchored_scores represents the deviation from the reference model
+    
+    anchored_scores = log_ratio / effective_tau
     
     if clip_anchored_score > 0:
         anchored_scores = torch.clamp(anchored_scores, -clip_anchored_score, clip_anchored_score)
@@ -553,55 +571,42 @@ def adpo_policy_loss(
     
     # 检查是否有完整的组结构（batch_size 是 num_generations 的整数倍）
     has_complete_groups = (batch_size % num_generations == 0) and (batch_size >= num_generations)
+    is_flattened = not has_complete_groups
     
-    if not has_complete_groups and not use_precomputed_q:
-        raise ValueError(f"ADPO requires batch_size divisible by num_generations. Got {batch_size}, {num_generations}")
+    if is_flattened and not use_precomputed_q:
+        raise ValueError(f"ADPO requires batch_size divisible by num_generations or pre-computed q_target. Got {batch_size}, {num_generations}")
     
     num_prompts = batch_size // num_generations if has_complete_groups else 0
-    index = kwargs.get("index", None)
-    sorted_idx = None
     
-    if index is not None:
-        # Index Mode: Sort by index to group elements physically
-        index_tensor = as_torch_index(index, device=anchored_scores.device)
-        sorted_idx = torch.argsort(index_tensor)
-        
-        if has_complete_groups:
-            # 有完整的组结构，reshape 为 (P, G)
-            u_grouped = anchored_scores[sorted_idx].view(num_prompts, num_generations)
-            adv_grouped = advantages[sorted_idx].view(num_prompts, num_generations)
-            old_log_prob_grouped = seq_old_log_prob[sorted_idx].view(num_prompts, num_generations)
-            if q_target_precomputed is not None:
-                q_grouped = q_target_precomputed[sorted_idx].view(num_prompts, num_generations)
-            else:
-                q_grouped = None
+    # ============================================================
+    # Unified Grouping: Always use sorted_idx (pre-computed or computed on-demand)
+    # This eliminates the redundant Reshape Mode vs Index Mode branches
+    # ============================================================
+    index = kwargs.get("index", None)
+    sorted_idx = kwargs.get("sorted_idx", None)
+    
+    # Get or compute sorted_idx
+    if sorted_idx is None:
+        if index is not None:
+            index_tensor = as_torch_index(index, device=anchored_scores.device)
+            sorted_idx = torch.argsort(index_tensor)
         else:
-            # 没有完整的组结构（partial batch），保持 flattened (B,)
-            u_grouped = anchored_scores[sorted_idx]
-            adv_grouped = advantages[sorted_idx]
-            old_log_prob_grouped = seq_old_log_prob[sorted_idx]
-            if q_target_precomputed is not None:
-                q_grouped = q_target_precomputed[sorted_idx]
-            else:
-                q_grouped = None
-            
+            # No index provided, assume data is already in order
+            sorted_idx = torch.arange(batch_size, device=anchored_scores.device)
+    
+    # Apply sorting and reshape
+    if has_complete_groups:
+        # Full group structure: reshape to (P, G)
+        u_grouped = anchored_scores[sorted_idx].view(num_prompts, num_generations)
+        adv_grouped = advantages[sorted_idx].view(num_prompts, num_generations)
+        old_log_prob_grouped = seq_old_log_prob[sorted_idx].view(num_prompts, num_generations)
+        q_grouped = q_target_precomputed[sorted_idx].view(num_prompts, num_generations) if use_precomputed_q else None
     else:
-        # Reshape Mode: Assume already grouped
-        if has_complete_groups:
-            # 有完整的组结构，reshape 为 (P, G)
-            u_grouped = anchored_scores.view(num_prompts, num_generations)
-            adv_grouped = advantages.view(num_prompts, num_generations)
-            old_log_prob_grouped = seq_old_log_prob.view(num_prompts, num_generations)
-            if q_target_precomputed is not None:
-                q_grouped = q_target_precomputed.view(num_prompts, num_generations)
-            else:
-                q_grouped = None
-        else:
-            # 没有完整的组结构，保持 flattened (B,)
-            u_grouped = anchored_scores
-            adv_grouped = advantages
-            old_log_prob_grouped = seq_old_log_prob
-            q_grouped = q_target_precomputed
+        # Partial batch (flattened): keep as (B,)
+        u_grouped = anchored_scores[sorted_idx]
+        adv_grouped = advantages[sorted_idx]
+        old_log_prob_grouped = seq_old_log_prob[sorted_idx]
+        q_grouped = q_target_precomputed[sorted_idx] if use_precomputed_q else None
             
     # ============================================================
     # Step 5: Compute q_target (if not provided)
@@ -613,6 +618,9 @@ def adpo_policy_loss(
     # ============================================================
     # Step 6: Compute Loss (on (P, G) tensors or (B,) tensors)
     # ============================================================
+    
+    # Track if on-policy gradient fix is used (for AlphaPO)
+    alphapo_on_policy_fix_used = False
     
     if loss_variant == "plackett_luce":
         # Plackett-Luce 需要完整的组结构来进行 ranking
@@ -761,6 +769,157 @@ def adpo_policy_loss(
 
             u_center_val = u_center.mean().detach()
             
+        elif loss_variant == "alphapo":
+            # =====================================================
+            # Alpha-Divergence Preference Optimization (AlphaPO)
+            # L_alpha = E[ D_alpha(q || p) ]
+            # grad = -1/alpha * sum_{i} [ p(i) * (q(i)/p(i))^alpha * grad log p(i) ]
+            #      = -1/alpha * sum_{i} [ q(i)^alpha * p(i)^(1-alpha) * grad log p(i) ]
+            #
+            # Supports both full batch (P, G) and partial batch (B,) modes.
+            # Partial batch mode requires pre-computed q_target.
+            # =====================================================
+            
+            # 使用自适应后的有效 alpha
+            alpha = effective_alpha
+            eps = 1e-10
+            
+            # Detect on-policy case: log_ratio ≈ 0 OR u_centered ≈ 0
+            # This happens when:
+            # 1. old_log_prob = log_prob.detach() (on-policy mode)
+            # 2. log_ratio is small due to policy being close to anchor
+            # In either case, u_centered ≈ 0 causes softmax to become uniform,
+            # leading to constant log_p = -log(G) and zero gradients.
+            log_ratio_mean = log_ratio.abs().mean()
+            u_centered_std = u_centered.std() if has_complete_groups else u_grouped.std()
+            
+            # Check both conditions: log_ratio and u_centered
+            # If u_centered has very low variance, softmax → uniform → zero gradient
+            # Thresholds based on observed values:
+            # - log_ratio_mean ~ 0.001 from first step logs
+            # - anchored_score_std ~ 0.002 from first step logs (without advantage)
+            # 
+            # FIXED: Change to AND condition. Even if log_ratio is small, if u_centered has 
+            # enough variance (e.g. from advantage weighting), we can use standard AlphaPO loss.
+            # Only when BOTH are small do we risk zero gradients.
+            is_on_policy_case = (log_ratio_mean < 0.01) and (u_centered_std < 0.01)
+            
+            if is_on_policy_case:
+                print(f"[AlphaPO] On-policy fix triggered! log_ratio={log_ratio_mean:.6f}, u_std={u_centered_std:.6f}")
+            
+            if is_flattened:
+                # =====================================================
+                # Partial Batch Mode: Support for micro_batch < num_generations
+                # 
+                # In this mode, we cannot compute softmax(u) because group members
+                # are distributed across different micro-batches.
+                # 
+                # Solution: Use approximation for p in mix_prob calculation.
+                # For ppo_epochs=1 (on-policy), at training start:
+                #   - log_ratio ≈ 0 (policy close to anchor)
+                #   - p = softmax(log_ratio / tau) ≈ Uniform(1/G)
+                #
+                # So we approximate: mix_prob ≈ q^α * Uniform^(1-α) = q^α * (1/G)^(1-α)
+                # This preserves the advantage signal (through q) while being mathematically sound.
+                # =====================================================
+                
+                if q_grouped is None:
+                    raise ValueError("AlphaPO partial batch mode requires pre-computed q_target.")
+                
+                # Check if p_target was pre-computed
+                p_target_precomputed = kwargs.get("p_target", None)
+                
+                if p_target_precomputed is not None:
+                    # Use pre-computed p_target
+                    p_approx = p_target_precomputed[sorted_idx]
+                else:
+                    # Approximate p as Uniform (valid when log_ratio ≈ 0)
+                    # p ≈ 1/G for each sample in the group
+                    p_approx = torch.full_like(q_grouped, 1.0 / num_generations)
+                
+                # Compute mix_prob = q^alpha * p^(1-alpha)
+                # Note: This gives q^α * (1/G)^(1-α), which emphasizes high-advantage samples
+                mix_prob = torch.pow(q_grouped.detach() + eps, alpha) * torch.pow(p_approx.detach() + eps, 1.0 - alpha)
+                
+                # Get seq_log_prob in sorted order
+                seq_log_prob_sorted = seq_log_prob[sorted_idx]
+                
+                # AlphaPO-style loss: weighted sum of log_probs
+                # L = -1/α * Σ [mix_prob * seq_log_prob]
+                # Gradient flows through seq_log_prob -> log_prob -> model parameters
+                loss = -(1.0 / alpha) * (mix_prob.detach() * seq_log_prob_sorted).mean()
+                
+                # Metrics (limited in flattened mode)
+                term_alignment = (q_grouped.detach() * u_grouped).mean().detach()
+                term_logsumexp = torch.tensor(0.0, device=u_grouped.device)
+                log_Z = torch.tensor(0.0, device=u_grouped.device)
+                u_center_val = torch.tensor(0.0, device=u_grouped.device)
+                
+            else:
+                # =====================================================
+                # Full Batch Mode: Standard AlphaPO with (P, G) tensors
+                # =====================================================
+                
+                # Compute p_theta (current policy distribution)
+                # Use F.log_softmax for better performance (fused kernel, single pass)
+                log_p = F.log_softmax(u_centered, dim=-1)  # (P, G)
+                p_theta = torch.exp(log_p)
+                log_Z = u_centered.logsumexp(dim=-1, keepdim=True)  # Only for metrics
+                
+                # Compute importance weights (detached)
+                # weight = q^alpha * p^(1-alpha)
+                mix_prob = torch.pow(q_grouped.detach() + eps, alpha) * torch.pow(p_theta.detach() + eps, 1.0 - alpha)
+                
+                if is_on_policy_case:
+                    # On-policy fix: Use REINFORCE-style gradient estimation
+                    # When log_ratio ≈ 0, standard AlphaPO has zero gradient
+                    alphapo_on_policy_fix_used = True
+                    
+                    # Get seq_log_prob in grouped form (P, G)
+                    seq_log_prob_grouped = seq_log_prob[sorted_idx].view(num_prompts, num_generations)
+                    
+                    # Normalize mix_prob for stability
+                    mix_prob_normalized = mix_prob / (mix_prob.sum(dim=-1, keepdim=True) + eps)
+                    loss_per_prompt = -(mix_prob_normalized.detach() * seq_log_prob_grouped).sum(dim=-1)
+                    loss = loss_per_prompt.mean()
+                    
+                    # Entropy bonus to encourage exploration
+                    entropy_bonus = -(p_theta * log_p).sum(dim=-1).mean()
+                    loss = loss - 0.01 * entropy_bonus
+                else:
+                    # Standard AlphaPO loss (off-policy case)
+                    # L = - 1/alpha * sum( mix_prob * log_p )
+                    loss_per_prompt = -(1.0 / alpha) * (mix_prob * log_p).sum(dim=-1)
+                    loss = loss_per_prompt.mean()
+                    
+                    # DEBUG: Aggressive Gradient Check
+                    print(f"\n[AlphaPO_DEBUG_STEP] loss value: {loss.item()}")
+                    print(f"[AlphaPO_DEBUG_STEP] loss.requires_grad: {loss.requires_grad}")
+                    print(f"[AlphaPO_DEBUG_STEP] loss.grad_fn: {loss.grad_fn}")
+                    
+                    if not loss.requires_grad:
+                        print("!!!!!! LOSS HAS NO GRADIENT - BROKEN CHAIN !!!!!!")
+                        print(f"  log_p.requires_grad={log_p.requires_grad} grad_fn={log_p.grad_fn}")
+                        print(f"  mix_prob.requires_grad={mix_prob.requires_grad}")
+                        print(f"  u_centered.requires_grad={u_centered.requires_grad} grad_fn={u_centered.grad_fn}")
+                        print(f"  u_grouped.requires_grad={u_grouped.requires_grad} grad_fn={u_grouped.grad_fn}")
+                        print(f"  anchored_scores.requires_grad={anchored_scores.requires_grad} grad_fn={anchored_scores.grad_fn}")
+                        print(f"  log_ratio.requires_grad={log_ratio.requires_grad} grad_fn={log_ratio.grad_fn}")
+                        print(f"  log_prob input requires_grad={log_prob.requires_grad} grad_fn={log_prob.grad_fn}")
+                        # Raise error to stop training and force user to see this
+                        # raise RuntimeError("AlphaPO Loss has no gradient! Check logs above.")
+
+                    # Also check if gradient is zero (vanishing)
+                    # We can't check .grad yet, but we can check values
+                    if u_centered.std() < 1e-6:
+                         print(f"!!!!!! u_centered VANISHED: std={u_centered.std().item()} !!!!!!")
+
+                
+                # Metrics
+                term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+                term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
+                u_center_val = u_center.mean().detach()
+
         else:
             # =====================================================
             # 标准模式：实时计算 logsumexp（需要组内完整）
@@ -779,7 +938,6 @@ def adpo_policy_loss(
             term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
             term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations  # approx Z/G
             u_center_val = u_center.mean().detach()
-    
     # ============================================================
     # Step 7: 梯度裁剪 & Logit Reg
     # ============================================================
@@ -818,11 +976,15 @@ def adpo_policy_loss(
             "adpo/advantage_std": advantages.std().item(),
             "adpo/anchored_score_mean": anchored_scores.mean().item(),
             "adpo/anchored_score_std": anchored_scores.std().item(),
+            "adpo/log_ratio_mean": log_ratio.abs().mean().item(),  # Monitor log_ratio component
+            "adpo/adv_score_weight": adv_score_weight,  # Current weight setting
             "adpo/effective_tau": float(effective_tau.item() if isinstance(effective_tau, torch.Tensor) else effective_tau),
+            "adpo/effective_alpha": float(effective_alpha.item() if isinstance(effective_alpha, torch.Tensor) else effective_alpha),
             "adpo/term_alignment": float(term_alignment.item() if isinstance(term_alignment, torch.Tensor) else term_alignment),
             "adpo/term_logsumexp": float(term_logsumexp.item() if isinstance(term_logsumexp, torch.Tensor) else term_logsumexp),
             "adpo/logit_reg_loss": float(logit_reg_loss.item() if isinstance(logit_reg_loss, torch.Tensor) else logit_reg_loss),
             "adpo/u_center": float(u_center_val.item() if isinstance(u_center_val, torch.Tensor) else u_center_val),
+            "adpo/alphapo_on_policy_fix": 1.0 if alphapo_on_policy_fix_used else 0.0,
         }
         
         if adaptive_debug:
@@ -831,5 +993,7 @@ def adpo_policy_loss(
             metrics["adpo/confidence"] = adaptive_debug["confidence_t"].item()
             metrics["adpo/reward_signal"] = adaptive_debug["reward_signal_t"].item()
             metrics["adpo/tau_modulation"] = adaptive_debug["tau_mod_t"].item()
+            if "effective_alpha" in adaptive_debug:
+                metrics["adpo/alpha"] = adaptive_debug["effective_alpha"].item()
     
     return loss, metrics
