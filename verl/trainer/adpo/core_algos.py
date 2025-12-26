@@ -14,6 +14,7 @@ ADPO核心算法 - 保留完整功能的向量化实现
 """
 
 from typing import Optional, Dict, Any
+import os
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -645,6 +646,10 @@ def adpo_policy_loss(
     gathered_old_log_prob = seq_old_log_prob
     gathered_q = q_target_precomputed  # Might be None
     
+    # Extract index from kwargs early (needed for global gather and later grouping)
+    index = kwargs.get("index", None)
+    sorted_idx = kwargs.get("sorted_idx", None)
+    
     if use_global_gather:
         import torch.distributed.nn.functional as dist_fn
         
@@ -696,8 +701,7 @@ def adpo_policy_loss(
     # Unified Grouping: Always use sorted_idx (pre-computed or computed on-demand)
     # This eliminates the redundant Reshape Mode vs Index Mode branches
     # ============================================================
-    index = kwargs.get("index", None)
-    sorted_idx = kwargs.get("sorted_idx", None)
+    # Note: index and sorted_idx are extracted from kwargs earlier (before use_global_gather block)
     
     # Get or compute sorted_idx (if not set by global logic)
     if sorted_idx is None:
@@ -886,7 +890,7 @@ def adpo_policy_loss(
             # Only when BOTH are small do we risk zero gradients.
             is_on_policy_case = (log_ratio_mean < 0.01) and (u_centered_std < 0.01)
             
-            if is_on_policy_case:
+            if is_on_policy_case and os.environ.get("VERL_DEBUG", "0") == "1":
                 print(f"[AlphaPO] On-policy fix triggered! log_ratio={log_ratio_mean:.6f}, u_std={u_centered_std:.6f}")
             
             # =====================================================
@@ -983,7 +987,6 @@ def adpo_policy_loss(
             "adpo/anchored_score_mean": anchored_scores.mean().item(),
             "adpo/anchored_score_std": anchored_scores.std().item(),
             "adpo/log_ratio_mean": log_ratio.abs().mean().item(),  # Monitor log_ratio component
-            "adpo/adv_score_weight": adv_score_weight,  # Current weight setting
             "adpo/effective_tau": float(effective_tau.item() if isinstance(effective_tau, torch.Tensor) else effective_tau),
             "adpo/effective_alpha": float(effective_alpha.item() if isinstance(effective_alpha, torch.Tensor) else effective_alpha),
             "adpo/term_alignment": float(term_alignment.item() if isinstance(term_alignment, torch.Tensor) else term_alignment),

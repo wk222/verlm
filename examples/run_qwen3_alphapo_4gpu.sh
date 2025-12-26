@@ -1,9 +1,5 @@
 #!/bin/bash
-# Reproduce AlphaPO Baseline - Qwen3-1.7B on WZX MATH Dataset
-# Optimized for 4x4090 (24GB VRAM each)
-
 set -e  # Exit on error
-
 echo "=========================================="
 echo "AlphaPO Reproduction - Qwen3 on WZX MATH (4x4090)"
 echo "=========================================="
@@ -57,17 +53,18 @@ python -m verl.trainer.main_adpo \
     --config-name ${CONFIG_NAME} \
     data.train_files=${DATA_DIR}/train.parquet \
     data.val_files=${DATA_DIR}/train.parquet \
-    data.train_batch_size=64 \
-    data.val_batch_size=32 \
-    data.max_prompt_length=880 \
+    data.train_batch_size=48 \
+    data.val_batch_size=24 \
+    data.max_prompt_length=1024 \
     data.max_response_length=1280 \
-    data.truncation=right \
-    actor_rollout_ref.rollout.n=8 \
+    data.truncation=left \
+    algorithm.num_generations=6 \
+    actor_rollout_ref.rollout.n=6 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enable_prefix_caching=True \
-    actor_rollout_ref.rollout.max_num_seqs=300 \
+    actor_rollout_ref.rollout.max_num_seqs=256 \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.actor.ppo_mini_batch_size=24 \

@@ -1,9 +1,6 @@
-# AlphaPO Training Configuration - Qwen3 on WZX MATH Dataset (Hybrid mode - 4 GPU)
-# Optimized for 4x4090 with ~2K training samples
-# Key changes:
-#   - Reduced train_batch_size from 128 to 32 for more training steps
-#   - Reduced num_generations from 8 to 4 for memory efficiency
-#   - Adjusted mini/micro batch sizes accordingly
+# GSPO Training Configuration - Qwen3 on MATH Dataset (4x4090, Fair Comparison)
+# GSPO = GRPO + Sequence-level Probability
+# Fair comparison with AlphaPO/ADPO settings
 
 defaults:
   - actor@actor_rollout_ref.actor: dp_actor
@@ -15,17 +12,17 @@ defaults:
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
 
+# Critic configuration (disabled for GSPO)
 critic:
   enable: False
 
+# Data configuration
 data:
   train_files: $DATA_DIR/train.parquet
   val_files: $DATA_DIR/train.parquet
   prompt_key: prompt
   max_prompt_length: 1024
   max_response_length: 1280
-  # Reduced from 128 to 32: gives ~62 steps per epoch instead of ~16
-  # More updates = better learning signal
   train_batch_size: 48
   val_batch_size: 24
   truncation: left
@@ -34,6 +31,7 @@ data:
   return_raw_input_ids: False
   return_raw_chat: False
 
+# Actor, rollout, and reference model configuration
 actor_rollout_ref:
   hybrid_engine: True
   model:
@@ -45,25 +43,22 @@ actor_rollout_ref:
     use_remove_padding: True
   actor:
     strategy: fsdp2
-    # Total samples per step: train_batch_size × n = 32 × 4 = 128
-    # ppo_mini_batch_size should be divisible by num_generations (4)
-    ppo_mini_batch_size: 24  # Reduced from 64
+    ppo_mini_batch_size: 24           # Aligned with AlphaPO
     ppo_micro_batch_size: null
-    # Micro batch size per GPU. Can be any value now that partial batch is supported.
-    # AlphaPO will use Uniform approximation for p when micro_batch < num_generations.
-    ppo_micro_batch_size_per_gpu: 6
-    # Note: ppo_epochs=1 is recommended for ADPO/AlphaPO
-    # Unlike PPO, ADPO doesn't benefit from multiple epochs on the same data
-    # because the anchoring mechanism is designed for single-pass updates
-    ppo_epochs: 1
+    ppo_micro_batch_size_per_gpu: 6   # Aligned with AlphaPO
     use_dynamic_bsz: False
     use_kl_loss: False
+    # GSPO loss: auto-detects advantages dimension for optimal computation
     policy_loss:
-      loss_mode: adpo
-      # Reduced from 8 to 4: saves memory, faster rollout
-      num_generations: 6
+      loss_mode: gspo
+    # Note: loss_agg_mode is ignored by gspo (it handles aggregation internally)
+    loss_agg_mode: token-mean
+    # Clip ratio configuration (Asymmetric clipping recommended for GSPO)
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
     optim:
-      lr: 2e-6  # Slightly higher LR for smaller batch
+      lr: 1e-6
     fsdp_config:
       wrap_policy:
         min_num_params: 0
@@ -77,13 +72,12 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    # Reduced from 8 to 4: matches num_generations
-    n: 6
+    n: 6                              # Aligned with AlphaPO
     gpu_memory_utilization: 0.55
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 16
-    max_num_seqs: 256  # Reduced for smaller batch
+    log_prob_micro_batch_size_per_gpu: 32
+    max_num_seqs: 256                 # Aligned with AlphaPO
     ignore_eos: False
     enforce_eager: False
     enable_chunked_prefill: True
@@ -91,58 +85,30 @@ actor_rollout_ref:
     free_cache_engine: True
     do_sample: True
 
-
+# Algorithm configuration for GSPO
 algorithm:
-  adv_estimator: adpo
-  num_generations: 6  # Must match rollout.n and policy_loss.num_generations
+  # GSPO uses sequence-level GRPO advantage estimator (returns B, not B*T)
+  adv_estimator: grpo_seq
+  
   gamma: 1.0
   lam: 1.0
+  
+  # GSPO does not use KL penalty
   use_kl_in_reward: False
   kl_ctrl:
     type: fixed
     kl_coef: 0.0
   
-  # ============================================================
-  # AlphaPO Configuration
-  # ============================================================
-  loss_variant: alphapo
-  alpha: 0.9                      # Initial alpha (forward-KL like)
+  # GRPO advantage normalization
+  norm_adv_by_std_in_grpo: True
   
-  # Adaptive Alpha Schedule (Reward + Confidence Guarded)
-  use_adaptive_alpha: True
-  alpha_max: 0.9                  # Start with mode-covering
-  alpha_min: 0.35                 # Target mode-seeking
-  
-  tau: 0.5                        # Anchoring temperature
-  beta_reward: 0.3                # Target distribution sharpness
-  clip_anchored_score: 10.0
-  clip_log_ratio: 5.0
-  use_length_normalization: True
-  grad_scale_factor: 20.0
-  logit_reg_coef: 0.01
-  use_q_center: False
-  
-  # Advantage-weighted score
-  # Set to 0.0 to allow natural gradient tension between anchor and target
-  # If p follows anchor (u=0) and q follows advantage, then p != q, providing gradients.
-  adv_score_weight: 0.0
-  
-  use_adaptive_tau: True
-  adaptive_tau_alpha: 0.2
-  adaptive_tau_beta: 0.5
-  adaptive_tau_min: 0.2
-  adaptive_tau_max: 1.5
-  vocab_size: 151936
-  
-  grad_clip_value: 0.0
-  scale_rewards: False
-  drop_all_failed_prompts: False
   global_batch_size: 32
 
+# Trainer configuration
 trainer:
-  total_epochs: 2
+  total_epochs: 2                    # Aligned with AlphaPO (was 4)
   project_name: ADPO-GSPO-WZX
-  experiment_name: qwen3-1.7b-alphapo-alpha0.5-wzx-4gpu
+  experiment_name: qwen3-1.7b-gspo-fair-wzx-4gpu
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
@@ -172,12 +138,13 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: false
-  hub_model_id: wzx111/Qwen3-1.7B-AlphaPO-math
+  hub_model_id: wzx111/Qwen3-1.7B-GSPO-Fair-math
   hub_private: true
   hub_final_upload: false
   hub_push_each_epoch: false
-  hub_commit_message: "VERL AlphaPO checkpoint"
+  hub_commit_message: "VERL GSPO Fair checkpoint"
 
+# Custom reward function (same as AlphaPO)
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy
@@ -196,14 +163,13 @@ reward_model:
 wandb_config:
   project: ADPO-GSPO-WZX
   entity: null
-  name: qwen3-1.7b-alphapo-alpha0.5-wzx-4gpu
-  group: qwen3_alphapo
+  name: qwen3-1.7b-gspo-fair-wzx-4gpu
+  group: qwen3_gspo
   tags:
-    - alphapo
-    - alpha_0.5
+    - gspo
+    - fair_comparison
     - qwen3
     - math
-    - reasoning
 
 ray_kwargs:
   ray_init:
@@ -222,3 +188,4 @@ global_profiler:
   tool: none
   steps: []
   profile_continuous_steps: false
+
