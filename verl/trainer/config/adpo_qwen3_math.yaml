@@ -115,9 +115,11 @@ algorithm:
   kl_penalty: kl
 
 # Reward function configuration
+# Using math_verify.py (0/1 rewards) - more robust parsing with math-verify library
+# Note: Requires 'pip install math-verify'
 custom_reward_function:
-  path: verl/trainer/adpo/reward.py
-  name: good_accuracy
+  path: verl/utils/reward_score/math_verify.py
+  name: compute_score
 
 reward_model:
   enable: false

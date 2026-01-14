@@ -1,7 +1,6 @@
-# ADPO-SFT Training Configuration
-# Based on alphapo_qwen3_math.yaml but uses Softmax loss with coef_A=0.0
-# This removes the reference anchor, making it behave like Advantage-weighted SFT
-# For fair comparison with AlphaPO and standard ADPO
+# AlphaPO Training Configuration - Legacy Adaptive Alpha
+# Uses Reward + Confidence based alpha adaptation (original method)
+# For comparison with ESS-based adaptive alpha
 
 defaults:
   - actor@actor_rollout_ref.actor: dp_actor
@@ -90,14 +89,16 @@ algorithm:
     kl_coef: 0.0
   
   # ============================================================
-  # ADPO-SFT Configuration
+  # AlphaPO Configuration - LEGACY Adaptive Alpha
   # ============================================================
-  loss_variant: softmax           # Use Softmax loss
-  softmax_coef_A: 0.0             # Remove reference anchor -> SFT behavior
-  softmax_coef_B: 0.0
-  softmax_coef_C: 0.0
+  loss_variant: alphapo
+  alpha: 0.9                      # Initial alpha
   
-  use_adaptive_alpha: False       # Not applicable for softmax
+  # Adaptive Alpha Schedule - LEGACY Method (Reward + Confidence)
+  use_adaptive_alpha: True
+  adaptive_alpha_method: legacy   # Use legacy method instead of ESS
+  alpha_max: 0.9                  # Start with mode-covering
+  alpha_min: 0.35                 # Target mode-seeking
   
   tau: 0.5
   beta_reward: 0.3
@@ -124,7 +125,7 @@ algorithm:
 trainer:
   total_epochs: 2
   project_name: ADPO-GSPO-WZX
-  experiment_name: qwen3-1.7b-adpo-sft
+  experiment_name: qwen3-1.7b-alphapo-legacy
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
@@ -154,15 +155,12 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: false
-  hub_model_id: wzx111/Qwen3-1.7B-ADPO-SFT
+  hub_model_id: wzx111/Qwen3-1.7B-AlphaPO-legacy
   hub_private: true
   hub_final_upload: false
   hub_push_each_epoch: false
-  hub_commit_message: "VERL ADPO-SFT checkpoint"
+  hub_commit_message: "VERL AlphaPO Legacy checkpoint"
 
-# Reward function configuration
-# Using math_dapo.py (0/1 rewards) - more robust parsing with math-verify library
-# Note: Requires 'pip install math-verify'
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy
@@ -181,12 +179,11 @@ reward_model:
 wandb_config:
   project: ADPO-GSPO-WZX
   entity: null
-  name: qwen3-1.7b-adpo-sft
-  group: qwen3_adpo
+  name: qwen3-1.7b-alphapo-legacy
+  group: qwen3_alphapo
   tags:
-    - adpo
-    - sft_variant
-    - no_anchor
+    - alphapo
+    - legacy_adaptive
     - qwen3
     - math
 

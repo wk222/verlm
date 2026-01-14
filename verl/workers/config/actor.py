@@ -109,6 +109,21 @@ class PolicyLossConfig(BaseConfig):
     softmax_coef_B: float = 0.0
     softmax_coef_C: float = 0.0
     
+    # AlphaPO Params
+    # When `use_adaptive_alpha` is False, `alpha` is used as a fixed value.
+    # When `use_adaptive_alpha` is True, alpha is selected via ESS(target) on the current (q,p),
+    # then optionally smoothed by EMA and limited by max_delta.
+    alpha: float = 0.6
+    use_adaptive_alpha: bool = False
+    adaptive_alpha_method: str = "ess"  # Options: "ess" (new), "legacy" (reward-confidence)
+    alpha_min: float = 0.35
+    alpha_max: float = 0.9
+    adaptive_alpha_warmup_steps: int = 10
+    adaptive_alpha_ema: float = 0.9
+    adaptive_alpha_max_delta: float = 0.05
+    adaptive_alpha_num_candidates: int = 11
+    ess_target_frac: float = 0.5
+    
     # PL Params
     pl_top_k: int = 0
     pl_temperature: float = 1.0

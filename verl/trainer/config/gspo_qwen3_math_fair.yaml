@@ -1,6 +1,5 @@
-# GSPO Training Configuration - Qwen3 on MATH Dataset (4x4090, Fair Comparison)
-# GSPO = GRPO + Sequence-level Probability
-# Fair comparison with AlphaPO/ADPO settings
+# GSPO Fair Comparison Configuration
+# Optimized for 4x4090, matched with AlphaPO parameters for fair comparison
 
 defaults:
   - actor@actor_rollout_ref.actor: dp_actor
@@ -12,18 +11,16 @@ defaults:
   - algorithm@algorithm.rollout_correction: rollout_correction
   - _self_
 
-# Critic configuration (disabled for GSPO)
 critic:
   enable: False
 
-# Data configuration
 data:
   train_files: $DATA_DIR/train.parquet
   val_files: $DATA_DIR/train.parquet
   prompt_key: prompt
   max_prompt_length: 1024
   max_response_length: 1280
-  train_batch_size: 48
+  train_batch_size: 48 # Match AlphaPO
   val_batch_size: 24
   truncation: left
   shuffle: true
@@ -31,7 +28,6 @@ data:
   return_raw_input_ids: False
   return_raw_chat: False
 
-# Actor, rollout, and reference model configuration
 actor_rollout_ref:
   hybrid_engine: True
   model:
@@ -43,22 +39,16 @@ actor_rollout_ref:
     use_remove_padding: True
   actor:
     strategy: fsdp2
-    ppo_mini_batch_size: 24           # Aligned with AlphaPO
+    ppo_mini_batch_size: 24
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 6   # Aligned with AlphaPO
+    ppo_micro_batch_size_per_gpu: 6
+    ppo_epochs: 1 # Match AlphaPO
     use_dynamic_bsz: False
-    use_kl_loss: False
-    # GSPO loss: auto-detects advantages dimension for optimal computation
+    use_kl_loss: False  # Disabled for fair comparison (no KL loss like other algorithms)
     policy_loss:
-      loss_mode: gspo
-    # Note: loss_agg_mode is ignored by gspo (it handles aggregation internally)
-    loss_agg_mode: token-mean
-    # Clip ratio configuration (Asymmetric clipping recommended for GSPO)
-    clip_ratio: 0.2
-    clip_ratio_low: 0.2
-    clip_ratio_high: 0.28
+      loss_mode: gspo  # GSPO loss mode
     optim:
-      lr: 1e-6
+      lr: 2e-6
     fsdp_config:
       wrap_policy:
         min_num_params: 0
@@ -72,12 +62,12 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1.0
-    n: 6                              # Aligned with AlphaPO
+    n: 6 # Match AlphaPO
     gpu_memory_utilization: 0.55
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 32
-    max_num_seqs: 256                 # Aligned with AlphaPO
+    log_prob_micro_batch_size_per_gpu: 16
+    max_num_seqs: 256
     ignore_eos: False
     enforce_eager: False
     enable_chunked_prefill: True
@@ -85,30 +75,28 @@ actor_rollout_ref:
     free_cache_engine: True
     do_sample: True
 
-# Algorithm configuration for GSPO
+
 algorithm:
-  # GSPO uses sequence-level GRPO advantage estimator (returns B, not B*T)
-  adv_estimator: grpo_seq
-  
+  adv_estimator: grpo  # GSPO uses GRPO advantage estimator
+  num_generations: 6
   gamma: 1.0
   lam: 1.0
-  
-  # GSPO does not use KL penalty
   use_kl_in_reward: False
   kl_ctrl:
     type: fixed
     kl_coef: 0.0
   
-  # GRPO advantage normalization
-  norm_adv_by_std_in_grpo: True
+  # GSPO Specifics
+  adv_params:
+    mode: mean
+    # You might want to double check specific GSPO params here if any
   
-  global_batch_size: 32
+  global_batch_size: 32 # This might need to match train_batch_size logic? leaving as safe default
 
-# Trainer configuration
 trainer:
-  total_epochs: 2                    # Aligned with AlphaPO (was 4)
+  total_epochs: 2 # Match AlphaPO
   project_name: ADPO-GSPO-WZX
-  experiment_name: qwen3-1.7b-gspo-fair-wzx-4gpu
+  experiment_name: qwen3-1.7b-gspo-fair
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
@@ -138,13 +126,15 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: false
-  hub_model_id: wzx111/Qwen3-1.7B-GSPO-Fair-math
+  hub_model_id: wzx111/Qwen3-1.7B-GSPO-fair
   hub_private: true
   hub_final_upload: false
   hub_push_each_epoch: false
-  hub_commit_message: "VERL GSPO Fair checkpoint"
+  hub_commit_message: "VERL GSPO checkpoint"
 
-# Custom reward function (same as AlphaPO)
+# Reward function configuration
+# Using math_dapo.py (0/1 rewards) - more robust parsing with math-verify library
+# Note: Requires 'pip install math-verify'
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy
@@ -163,7 +153,7 @@ reward_model:
 wandb_config:
   project: ADPO-GSPO-WZX
   entity: null
-  name: qwen3-1.7b-gspo-fair-wzx-4gpu
+  name: qwen3-1.7b-gspo-fair
   group: qwen3_gspo
   tags:
     - gspo
@@ -188,4 +178,3 @@ global_profiler:
   tool: none
   steps: []
   profile_continuous_steps: false
-

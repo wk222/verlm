@@ -547,10 +547,16 @@ def adpo_policy_loss(
     # ============================================================
     adaptive_debug = {}
     use_adaptive_alpha = _cfg("use_adaptive_alpha", False)
+    adaptive_alpha_method = _cfg("adaptive_alpha_method", "ess")
     alpha_min = _cfg("alpha_min", 0.35)
     alpha_max = _cfg("alpha_max", 0.9)
     
-    if use_adaptive_tau or use_adaptive_alpha:
+    # Adaptive Alpha Legacy Path or Adaptive Tau
+    # If method is "legacy", we compute alpha here based on reward/confidence.
+    # If method is "ess", we compute alpha LATER inside AlphaPO block based on ESS.
+    should_run_step2 = use_adaptive_tau or (use_adaptive_alpha and adaptive_alpha_method == "legacy")
+
+    if should_run_step2:
         with torch.no_grad():
             max_entropy = np.log(vocab_size)
             
@@ -577,25 +583,31 @@ def adpo_policy_loss(
                 effective_tau = tau
                 tau_mod_t = torch.tensor(1.0, device=advantages.device)
                 
-            # 2. 自适应 Alpha (AlphaPO 专属)
-            if use_adaptive_alpha:
+            # 2. 自适应 Alpha (AlphaPO 专属 - Legacy Method)
+            if use_adaptive_alpha and adaptive_alpha_method == "legacy":
                 # 只有当置信度高且有改进时，才下调 alpha (向 mode-seeking 转换)
                 # alpha_t = alpha_max - (alpha_max - alpha_min) * confidence * improvement
                 alpha_gate = confidence_t * p_t
                 effective_alpha = alpha_max - (alpha_max - alpha_min) * alpha_gate
+                
+                # 保存debug信息 (Legacy)
+                adaptive_debug = {
+                    "mode": "legacy",
+                    "h_static_t": h_static_t, "h_dynamic_t": h_dynamic_t,
+                    "confidence_t": confidence_t, "reward_signal_t": reward_signal_t,
+                    "tau_mod_t": tau_mod_t,
+                    "effective_alpha": effective_alpha if isinstance(effective_alpha, torch.Tensor) else torch.tensor(effective_alpha, device=advantages.device)
+                }
             else:
-                effective_alpha = _cfg("alpha", 0.5)
+                # If using ESS method or fixed alpha, we use the config value as placeholder here
+                # ESS method will overwrite effective_alpha later
+                effective_alpha = _cfg("alpha", 0.6)
+                if use_adaptive_tau:
+                     adaptive_debug = {"tau_mod_t": tau_mod_t}
 
-            # 保存debug信息
-            adaptive_debug = {
-                "h_static_t": h_static_t, "h_dynamic_t": h_dynamic_t,
-                "confidence_t": confidence_t, "reward_signal_t": reward_signal_t,
-                "tau_mod_t": tau_mod_t,
-                "effective_alpha": effective_alpha if isinstance(effective_alpha, torch.Tensor) else torch.tensor(effective_alpha, device=advantages.device)
-            }
     else:
         effective_tau = tau
-        effective_alpha = _cfg("alpha", 0.5)
+        effective_alpha = _cfg("alpha", 0.6)
     
     # ============================================================
     # Step 3: 计算anchored scores
@@ -742,6 +754,7 @@ def adpo_policy_loss(
     
     # Track if on-policy gradient fix is used (for AlphaPO)
     alphapo_on_policy_fix_used = False
+    adaptive_alpha_debug = None  # Initialize to avoid UnboundLocalError
     
     if loss_variant == "plackett_luce":
         # Plackett-Luce 需要完整的组结构来进行 ranking
@@ -866,8 +879,129 @@ def adpo_policy_loss(
             # Partial batch mode requires pre-computed q_target.
             # =====================================================
             
+            # ============================================================
+            # Adaptive Alpha via ESS (True Closed-Loop, DDP-consistent)
+            # ============================================================
+            adaptive_alpha_debug = None
+            if use_adaptive_alpha and adaptive_alpha_method == "ess":
+                with torch.no_grad():
+                    # ---- configs ----
+                    warmup_steps = int(_cfg("adaptive_alpha_warmup_steps", 10))
+                    ema_m = float(_cfg("adaptive_alpha_ema", 0.9)) # 0.8~0.98
+                    max_delta = float(_cfg("adaptive_alpha_max_delta", 0.05)) # 每步最大变化，0=不限制
+                    num_candidates = int(_cfg("adaptive_alpha_num_candidates", 11)) # 9~17 常用
+                    ess_target_frac = float(_cfg("ess_target_frac", 0.5)) # 目标 ESS = frac * G
+                    
+                    # ---- step counter ----
+                    _ADAPTIVE_ALPHA_STATE["step"] += 1
+                    step = _ADAPTIVE_ALPHA_STATE["step"]
+                    
+                    # ---- hard freeze conditions ----
+                    # warmup / on-policy fix: 直接用 alpha_max，并且把 alpha_ema 也强制到 alpha_max（避免下一步跳变）
+                    if step <= warmup_steps or is_on_policy_case:
+                        alpha_out = float(alpha_max)
+                        _ADAPTIVE_ALPHA_STATE["alpha_ema"] = alpha_out
+                        _ADAPTIVE_ALPHA_STATE["initialized"] = True
+                        
+                        # DDP: broadcast same alpha_out to all ranks
+                        if dist.is_initialized() and dist.get_world_size() > 1:
+                            a_t = torch.tensor(alpha_out, device=u_centered.device, dtype=torch.float32)
+                            dist.broadcast(a_t, src=0)
+                            alpha_out = float(a_t.item())
+                            _ADAPTIVE_ALPHA_STATE["alpha_ema"] = alpha_out
+                        
+                        adaptive_alpha_debug = {
+                            "mode": "freeze",
+                            "step": step,
+                            "alpha_star": alpha_out,
+                            "alpha_ema": alpha_out,
+                            "ess_target": None,
+                        }
+                    else:
+                        # ---- compute ESS(alpha) on CURRENT (q,p) ----
+                        # q_grouped: (P,G), p_theta: (P,G)
+                        eps_local = 1e-10
+                        log_q = torch.log(q_grouped.detach() + eps_local) # (P,G)
+                        log_p_det = torch.log(p_theta.detach() + eps_local) # (P,G)
+                        
+                        P_val, G_val = log_q.shape
+                        ess_target = ess_target_frac * float(G_val)
+                        
+                        # Candidate alphas in [alpha_min, alpha_max]
+                        # 注意：这里 alpha 是 divergence family parameter，不要 clamp 到 0 或 1
+                        alpha_candidates = torch.linspace(
+                            float(alpha_min), float(alpha_max), steps=num_candidates, 
+                            device=u_centered.device, dtype=log_q.dtype
+                        ) # (K,)
+                        a = alpha_candidates.view(-1, 1, 1) # (K,1,1)
+                        
+                        # log_w(k,p,i) = alpha_k * log q + (1-alpha_k) * log p
+                        log_w = a * log_q.unsqueeze(0) + (1.0 - a) * log_p_det.unsqueeze(0) # (K,P,G)
+                        
+                        # normalized weights
+                        # w = exp(log_w) / sum exp(log_w)
+                        w = torch.softmax(log_w, dim=-1) # (K,P,G)
+                        
+                        ess_per_prompt = 1.0 / (w.pow(2).sum(dim=-1) + eps_local) # (K,P)
+                        ess_k = ess_per_prompt.mean(dim=-1) # (K,)
+                        
+                        # ---- DDP: make ESS_k global-consistent ----
+                        if dist.is_initialized() and dist.get_world_size() > 1:
+                            dist.all_reduce(ess_k, op=dist.ReduceOp.SUM)
+                            ess_k /= dist.get_world_size()
+                            
+                        # ---- select alpha_star to hit target ESS ----
+                        diff = (ess_k - ess_target).abs()
+                        best_idx = int(torch.argmin(diff).item())
+                        alpha_star = float(alpha_candidates[best_idx].item())
+                        ess_star = float(ess_k[best_idx].item())
+                        
+                        # ---- optional smoothing/limit (applied to OUTPUT only; ESS selection is stateless) ----
+                        if not _ADAPTIVE_ALPHA_STATE["initialized"] or _ADAPTIVE_ALPHA_STATE["alpha_ema"] is None:
+                            alpha_ema = alpha_star
+                            _ADAPTIVE_ALPHA_STATE["initialized"] = True
+                        else:
+                            alpha_prev = float(_ADAPTIVE_ALPHA_STATE["alpha_ema"])
+                            alpha_ema = ema_m * alpha_prev + (1.0 - ema_m) * alpha_star
+                            
+                            if max_delta > 0:
+                                lo = alpha_prev - max_delta
+                                hi = alpha_prev + max_delta
+                                alpha_ema = max(lo, min(hi, alpha_ema)) # safety clamp
+                                
+                            alpha_ema = max(1e-3, min(1.0 - 1e-3, alpha_ema))
+                            
+                        _ADAPTIVE_ALPHA_STATE["alpha_ema"] = alpha_ema
+                        
+                        # ---- DDP: broadcast final alpha_ema so every rank uses identical alpha in loss ----
+                        if dist.is_initialized() and dist.get_world_size() > 1:
+                            a_t = torch.tensor(alpha_ema, device=u_centered.device, dtype=torch.float32)
+                            dist.broadcast(a_t, src=0)
+                            alpha_ema = float(a_t.item())
+                            _ADAPTIVE_ALPHA_STATE["alpha_ema"] = alpha_ema
+                            
+                        alpha_out = alpha_ema
+                        
+                        adaptive_alpha_debug = {
+                            "mode": "ess",
+                            "step": step,
+                            "G": int(G_val),
+                            "ess_target": float(ess_target),
+                            "alpha_star": float(alpha_star),
+                            "alpha_ema": float(alpha_ema),
+                            "ess_star": float(ess_star),
+                            "ess_min": float(ess_k.min().item()),
+                            "ess_max": float(ess_k.max().item()),
+                        }
+                
+                # Update effective alpha for loss calculation
+                effective_alpha = torch.tensor(alpha_out, device=u_centered.device, dtype=u_centered.dtype)
+
             # 使用自适应后的有效 alpha
             alpha = effective_alpha
+            if not isinstance(alpha, torch.Tensor):
+                 alpha = torch.tensor(alpha, device=u_centered.device, dtype=u_centered.dtype)
+
             eps = 1e-10
             
             # Detect on-policy case: log_ratio ≈ 0 OR u_centered ≈ 0
@@ -996,12 +1130,33 @@ def adpo_policy_loss(
             "adpo/alphapo_on_policy_fix": 1.0 if alphapo_on_policy_fix_used else 0.0,
         }
         
+        # Metrics for Adaptive Alpha (ESS method)
+        if adaptive_alpha_debug is not None:
+            if adaptive_alpha_debug.get("mode") == "ess":
+                 metrics["adpo/alpha_mode"] = 1.0 
+                 metrics["adpo/alpha_star"] = adaptive_alpha_debug.get("alpha_star", 0.0)
+                 metrics["adpo/alpha_ema"] = adaptive_alpha_debug.get("alpha_ema", 0.0)
+                 if adaptive_alpha_debug.get("ess_target", None) is not None:
+                    metrics["adpo/ess_target"] = adaptive_alpha_debug["ess_target"]
+                    metrics["adpo/ess_star"] = adaptive_alpha_debug["ess_star"]
+                    metrics["adpo/ess_min"] = adaptive_alpha_debug["ess_min"]
+                    metrics["adpo/ess_max"] = adaptive_alpha_debug["ess_max"]
+            elif adaptive_alpha_debug.get("mode") == "freeze":
+                 metrics["adpo/alpha_mode"] = 0.5 # Freeze mode
+                 metrics["adpo/alpha_ema"] = adaptive_alpha_debug.get("alpha_ema", 0.0)
+        
+        # Metrics for Legacy Adaptive Alpha & Tau
         if adaptive_debug:
-            metrics["adpo/h_static"] = adaptive_debug["h_static_t"].item()
-            metrics["adpo/h_dynamic"] = adaptive_debug["h_dynamic_t"].item()
-            metrics["adpo/confidence"] = adaptive_debug["confidence_t"].item()
-            metrics["adpo/reward_signal"] = adaptive_debug["reward_signal_t"].item()
-            metrics["adpo/tau_modulation"] = adaptive_debug["tau_mod_t"].item()
+            if adaptive_debug.get("h_static_t") is not None:
+                metrics["adpo/h_static"] = adaptive_debug["h_static_t"].item()
+            if adaptive_debug.get("h_dynamic_t") is not None:
+                metrics["adpo/h_dynamic"] = adaptive_debug["h_dynamic_t"].item()
+            if adaptive_debug.get("confidence_t") is not None:
+                metrics["adpo/confidence"] = adaptive_debug["confidence_t"].item()
+            if adaptive_debug.get("reward_signal_t") is not None:
+                metrics["adpo/reward_signal"] = adaptive_debug["reward_signal_t"].item()
+            if adaptive_debug.get("tau_mod_t") is not None:
+                metrics["adpo/tau_modulation"] = adaptive_debug["tau_mod_t"].item()
             if "effective_alpha" in adaptive_debug:
                 metrics["adpo/alpha"] = adaptive_debug["effective_alpha"].item()
     

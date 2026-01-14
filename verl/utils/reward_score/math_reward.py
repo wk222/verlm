@@ -14,7 +14,7 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
 
-def compute_score(solution_str, ground_truth) -> float:
+def compute_score(solution_str, ground_truth, **kwargs) -> float:
     retval = 0.0
     try:
         string_in_last_boxed = last_boxed_only_string(solution_str)

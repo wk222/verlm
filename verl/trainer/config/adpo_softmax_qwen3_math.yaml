@@ -1,7 +1,6 @@
-# ADPO-Softmax Training Configuration - Qwen3 on WZX MATH Dataset
-# Based on AlphaPO config for fair comparison
-# Standard Variant: Anchored policy optimization (A=1)
-# u = (log_prob - old_log_prob) / tau
+# Standard ADPO (Softmax) Training Configuration
+# Based on alphapo_qwen3_math.yaml but uses standard Softmax loss with anchor
+# For fair comparison with AlphaPO
 
 defaults:
   - actor@actor_rollout_ref.actor: dp_actor
@@ -78,6 +77,7 @@ actor_rollout_ref:
     free_cache_engine: True
     do_sample: True
 
+
 algorithm:
   adv_estimator: adpo
   num_generations: 6
@@ -89,33 +89,32 @@ algorithm:
     kl_coef: 0.0
   
   # ============================================================
-  # ADPO-Softmax Configuration
+  # Standard ADPO-Softmax Configuration
   # ============================================================
-  loss_variant: softmax
-  
-  # Standard ADPO Settings:
-  # u = (log_prob - A*old_log_prob - B*q - C) / tau
-  # A=1.0 keeps the reference anchor -> Standard Anchored Preference Optimization
-  softmax_coef_A: 1.0
+  loss_variant: softmax           # Standard Softmax
+  softmax_coef_A: 1.0             # Keep Anchor
   softmax_coef_B: 0.0
   softmax_coef_C: 0.0
   
-  # Keep tau same as AlphaPO
+  use_adaptive_alpha: False       # Disable adaptive
+  
   tau: 0.5
   beta_reward: 0.3
-  
   clip_anchored_score: 10.0
   clip_log_ratio: 5.0
   use_length_normalization: True
   grad_scale_factor: 20.0
   logit_reg_coef: 0.01
   use_q_center: False
+  adv_score_weight: 0.0
   
-  # Disable adaptive features for fair comparison with fixed tau/alpha
-  use_adaptive_tau: False
-  use_adaptive_alpha: False
-  
+  use_adaptive_tau: True
+  adaptive_tau_alpha: 0.2
+  adaptive_tau_beta: 0.5
+  adaptive_tau_min: 0.2
+  adaptive_tau_max: 1.5
   vocab_size: 151936
+  
   grad_clip_value: 0.0
   scale_rewards: False
   drop_all_failed_prompts: False
@@ -124,7 +123,7 @@ algorithm:
 trainer:
   total_epochs: 2
   project_name: ADPO-GSPO-WZX
-  experiment_name: qwen3-1.7b-adpo-softmax-wzx-4gpu
+  experiment_name: qwen3-1.7b-adpo-softmax
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
@@ -154,12 +153,15 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: false
-  hub_model_id: wzx111/Qwen3-1.7B-ADPO-Softmax-math
+  hub_model_id: wzx111/Qwen3-1.7B-ADPO-Softmax
   hub_private: true
   hub_final_upload: false
   hub_push_each_epoch: false
   hub_commit_message: "VERL ADPO-Softmax checkpoint"
 
+# Reward function configuration
+# Using math_dapo.py (0/1 rewards) - more robust parsing with math-verify library
+# Note: Requires 'pip install math-verify'
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy
@@ -178,10 +180,11 @@ reward_model:
 wandb_config:
   project: ADPO-GSPO-WZX
   entity: null
-  name: qwen3-1.7b-adpo-softmax-wzx-4gpu
-  group: qwen3_adpo_softmax
+  name: qwen3-1.7b-adpo-softmax
+  group: qwen3_adpo
   tags:
-    - adpo_softmax
+    - adpo
+    - softmax
     - qwen3
     - math
 
@@ -202,4 +205,3 @@ global_profiler:
   tool: none
   steps: []
   profile_continuous_steps: false
-

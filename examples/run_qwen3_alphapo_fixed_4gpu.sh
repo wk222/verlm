@@ -1,12 +1,12 @@
 #!/bin/bash
-# ADPO-SFT Training - Qwen3-1.7B on WZX MATH Dataset
-# ADPO variant with softmax_coef_A=0.0 (No Anchor) -> Behaves like Advantage-Weighted SFT
+# AlphaPO Training (Fixed Alpha) - Qwen3-1.7B on WZX MATH Dataset
+# Fixed alpha=0.6 for fair comparison with Adaptive Alpha
 # Settings optimized for 4x4090
 
 set -e
 
 echo "=========================================="
-echo "ADPO-SFT Training (No Anchor) - Qwen3 on 4x4090"
+echo "AlphaPO Training (Fixed Alpha=0.6) - Qwen3 on 4x4090"
 echo "=========================================="
 echo ""
 
@@ -23,8 +23,8 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 # Configuration
-CONFIG_NAME="adpo_sft_qwen3_math"
-OUTPUT_DIR="data/Qwen3-1.7B-ADPO-SFT-WZX"
+CONFIG_NAME="alphapo_fixed_qwen3_math"
+OUTPUT_DIR="data/Qwen3-1.7B-AlphaPO-Fixed-WZX"
 DATA_DIR="data/math_level3"
 N_GPUS=4
 
@@ -33,24 +33,24 @@ echo "  - Config: ${CONFIG_NAME}"
 echo "  - Output: ${OUTPUT_DIR}"
 echo "  - Data: ${DATA_DIR}"
 echo "  - GPUs: ${CUDA_VISIBLE_DEVICES} (${N_GPUS} GPUs)"
-echo "  - Algorithm: ADPO-SFT (No Anchor)"
+echo "  - Algorithm: AlphaPO (Fixed Alpha=0.6)"
 echo ""
 
-# Download and preprocess MATH Level 3 dataset if not exists
+# Download and preprocess WZX MATH dataset if not exists
 if [ ! -f "${DATA_DIR}/train.parquet" ]; then
-    echo "📥 Downloading and preprocessing MATH Level 3 dataset..."
-    python3 examples/data_preprocess/math_level3_dataset.py \
+    echo "📥 Downloading and preprocessing WZX MATH dataset..."
+    python3 examples/data_preprocess/math_wzx_dataset.py \
         --local_save_dir ${DATA_DIR}
     echo ""
 else
-    echo "✅ MATH Level 3 dataset already exists at ${DATA_DIR}"
+    echo "✅ WZX MATH dataset already exists at ${DATA_DIR}"
     echo ""
 fi
 
-echo "🚀 Starting ADPO-SFT training..."
+echo "🚀 Starting AlphaPO (Fixed) training..."
 echo ""
 
-# 使用 main_adpo 运行 ADPO-SFT
+# 使用 main_adpo 运行 AlphaPO Fixed
 python -m verl.trainer.main_adpo \
     --config-name ${CONFIG_NAME} \
     data.train_files=${DATA_DIR}/train.parquet \
@@ -79,12 +79,12 @@ python -m verl.trainer.main_adpo \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.total_epochs=2 \
     trainer.project_name="ADPO-GSPO-WZX" \
-    trainer.experiment_name=qwen3-1.7b-adpo-sft-wzx-4gpu \
+    trainer.experiment_name=qwen3-1.7b-alphapo-fixed-0.6-4gpu \
     wandb_config.project="ADPO-GSPO-WZX" \
-    wandb_config.name=qwen3-1.7b-adpo-sft-wzx-4gpu \
+    wandb_config.name=qwen3-1.7b-alphapo-fixed-0.6-4gpu \
     "$@"
 
 echo ""
 echo "=========================================="
-echo "✅ ADPO-SFT Training Complete!"
+echo "✅ AlphaPO (Fixed) Training Complete!"
 echo "=========================================="

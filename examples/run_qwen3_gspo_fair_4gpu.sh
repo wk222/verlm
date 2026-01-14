@@ -20,11 +20,12 @@ fi
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 # Configuration
 CONFIG_NAME="gspo_qwen3_math_fair"
 OUTPUT_DIR="data/Qwen3-1.7B-GSPO-Fair-WZX"
-DATA_DIR="data/math_wzx"
+DATA_DIR="data/math_level3"  # Kept as math_level3 per instruction
 N_GPUS=4
 
 echo "Configuration:"
@@ -62,6 +63,7 @@ python -m verl.trainer.main_ppo \
     data.train_batch_size=48 \
     data.val_batch_size=24 \
     data.max_prompt_length=1024 \
+    data.max_response_length=1280 \
     data.truncation=left \
     actor_rollout_ref.rollout.n=6 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
@@ -77,6 +79,7 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
+    algorithm.num_generations=6 \
     trainer.n_gpus_per_node=${N_GPUS} \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.total_epochs=2 \

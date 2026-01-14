@@ -178,6 +178,9 @@ trainer:
   hub_push_each_epoch: false
   hub_commit_message: "VERL AlphaPO checkpoint"
 
+# Reward function configuration  
+# Using math_dapo.py (0/1 rewards) - more robust parsing with math-verify library
+# Note: Requires 'pip install math-verify'
 custom_reward_function:
   path: verl/trainer/adpo/reward.py
   name: good_accuracy

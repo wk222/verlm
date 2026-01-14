@@ -1,7 +1,6 @@
-# ADPO-SFT Training Configuration
-# Based on alphapo_qwen3_math.yaml but uses Softmax loss with coef_A=0.0
-# This removes the reference anchor, making it behave like Advantage-weighted SFT
-# For fair comparison with AlphaPO and standard ADPO
+# AlphaPO Training Configuration - Fixed Alpha Version
+# Based on alphapo_qwen3_math.yaml but with FIXED alpha=0.6 (no adaptive)
+# For fair comparison with adaptive alpha variants
 
 defaults:
   - actor@actor_rollout_ref.actor: dp_actor
@@ -90,14 +89,15 @@ algorithm:
     kl_coef: 0.0
   
   # ============================================================
-  # ADPO-SFT Configuration
+  # AlphaPO Configuration - FIXED ALPHA
   # ============================================================
-  loss_variant: softmax           # Use Softmax loss
-  softmax_coef_A: 0.0             # Remove reference anchor -> SFT behavior
-  softmax_coef_B: 0.0
-  softmax_coef_C: 0.0
+  loss_variant: alphapo
+  alpha: 0.6                      # FIXED alpha value
   
-  use_adaptive_alpha: False       # Not applicable for softmax
+  # Disable Adaptive Alpha
+  use_adaptive_alpha: False
+  alpha_max: 0.9
+  alpha_min: 0.35
   
   tau: 0.5
   beta_reward: 0.3
@@ -124,7 +124,7 @@ algorithm:
 trainer:
   total_epochs: 2
   project_name: ADPO-GSPO-WZX
-  experiment_name: qwen3-1.7b-adpo-sft
+  experiment_name: qwen3-1.7b-alphapo-fixed-0.6
   logger: ['wandb', 'console']
   nnodes: 1
   n_gpus_per_node: 4
@@ -154,11 +154,11 @@ trainer:
   bf16: True
   fp16: False
   push_to_hub: false
-  hub_model_id: wzx111/Qwen3-1.7B-ADPO-SFT
+  hub_model_id: wzx111/Qwen3-1.7B-AlphaPO-fixed
   hub_private: true
   hub_final_upload: false
   hub_push_each_epoch: false
-  hub_commit_message: "VERL ADPO-SFT checkpoint"
+  hub_commit_message: "VERL AlphaPO Fixed checkpoint"
 
 # Reward function configuration
 # Using math_dapo.py (0/1 rewards) - more robust parsing with math-verify library
@@ -181,12 +181,12 @@ reward_model:
 wandb_config:
   project: ADPO-GSPO-WZX
   entity: null
-  name: qwen3-1.7b-adpo-sft
-  group: qwen3_adpo
+  name: qwen3-1.7b-alphapo-fixed-0.6
+  group: qwen3_alphapo
   tags:
-    - adpo
-    - sft_variant
-    - no_anchor
+    - alphapo
+    - fixed_alpha
+    - alpha_0.6
     - qwen3
     - math
 

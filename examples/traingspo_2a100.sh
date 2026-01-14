@@ -21,7 +21,7 @@ fi
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 export CUDA_VISIBLE_DEVICES=0,1  # 2 GPUs
-export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 # Configuration
 CONFIG_NAME="gspo_qwen3_math_2a100"

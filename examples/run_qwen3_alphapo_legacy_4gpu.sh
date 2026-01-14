@@ -1,14 +1,12 @@
 #!/bin/bash
-# ADPO-SFT Training - Qwen3-1.7B on WZX MATH Dataset
-# ADPO variant with softmax_coef_A=0.0 (No Anchor) -> Behaves like Advantage-Weighted SFT
-# Settings optimized for 4x4090
+# AlphaPO Training - Legacy Adaptive Alpha (Reward + Confidence)
+# For comparison with ESS-based adaptive alpha
 
 set -e
 
 echo "=========================================="
-echo "ADPO-SFT Training (No Anchor) - Qwen3 on 4x4090"
+echo "AlphaPO Training (Legacy Adaptive) - Qwen3 (4x4090)"
 echo "=========================================="
-echo ""
 
 # Check if we're in the verlm directory
 if [ ! -d "verl/trainer" ]; then
@@ -23,8 +21,8 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 # Configuration
-CONFIG_NAME="adpo_sft_qwen3_math"
-OUTPUT_DIR="data/Qwen3-1.7B-ADPO-SFT-WZX"
+CONFIG_NAME="alphapo_legacy_qwen3_math"
+OUTPUT_DIR="data/Qwen3-1.7B-AlphaPO-Legacy-WZX"
 DATA_DIR="data/math_level3"
 N_GPUS=4
 
@@ -33,7 +31,7 @@ echo "  - Config: ${CONFIG_NAME}"
 echo "  - Output: ${OUTPUT_DIR}"
 echo "  - Data: ${DATA_DIR}"
 echo "  - GPUs: ${CUDA_VISIBLE_DEVICES} (${N_GPUS} GPUs)"
-echo "  - Algorithm: ADPO-SFT (No Anchor)"
+echo "  - Algorithm: AlphaPO (Legacy Adaptive Alpha)"
 echo ""
 
 # Download and preprocess MATH Level 3 dataset if not exists
@@ -47,10 +45,10 @@ else
     echo ""
 fi
 
-echo "🚀 Starting ADPO-SFT training..."
+echo "🚀 Starting AlphaPO (Legacy) training..."
 echo ""
 
-# 使用 main_adpo 运行 ADPO-SFT
+# Run Training
 python -m verl.trainer.main_adpo \
     --config-name ${CONFIG_NAME} \
     data.train_files=${DATA_DIR}/train.parquet \
@@ -79,12 +77,12 @@ python -m verl.trainer.main_adpo \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.total_epochs=2 \
     trainer.project_name="ADPO-GSPO-WZX" \
-    trainer.experiment_name=qwen3-1.7b-adpo-sft-wzx-4gpu \
+    trainer.experiment_name=qwen3-1.7b-alphapo-legacy-wzx-4gpu \
     wandb_config.project="ADPO-GSPO-WZX" \
-    wandb_config.name=qwen3-1.7b-adpo-sft-wzx-4gpu \
+    wandb_config.name=qwen3-1.7b-alphapo-legacy-wzx-4gpu \
     "$@"
 
 echo ""
 echo "=========================================="
-echo "✅ ADPO-SFT Training Complete!"
+echo "✅ AlphaPO (Legacy) Training Complete!"
 echo "=========================================="
