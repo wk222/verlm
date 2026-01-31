@@ -167,8 +167,9 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         # Cast the weight into fp8 and its scale factor
         if quant_config.weight_block_size is not None:
             logger.info("Using blockwise quantization")
+            # Move to CPU for quantization to save GPU memory
             param_lp, param_scale = scaled_fp8_blockwise(
-                v.to(dtype),
+                v.to(device="cpu", dtype=dtype),
                 weight_block_size=quant_config.weight_block_size,
             )
             param_scale = param_scale.squeeze(-1)
@@ -189,12 +190,80 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     return weights_quantized
 
 
+def merge_split_fp8_weights(weights_list):
+    """
+    Merge split weights (q_proj, k_proj, v_proj -> qkv_proj) and (gate_proj, up_proj -> gate_up_proj)
+    This is necessary because VLLM expects merged weights for Qwen2, but the converter produces split HF weights.
+    """
+    new_weights = []
+    buffer = {} 
+    
+    for name, tensor in weights_list:
+        if 'self_attn' in name and any(x in name for x in ['q_proj', 'k_proj', 'v_proj']) and 'qkv_proj' not in name:
+            if 'q_proj' in name:
+                comp = 'q'
+                base_name = name.replace('q_proj', 'qkv_proj')
+            elif 'k_proj' in name:
+                comp = 'k'
+                base_name = name.replace('k_proj', 'qkv_proj')
+            elif 'v_proj' in name:
+                comp = 'v'
+                # Special handling for bias if necessary, but v_proj.bias maps to qkv_proj.bias replacement
+                base_name = name.replace('v_proj', 'qkv_proj')
+            
+            if base_name not in buffer:
+                buffer[base_name] = {}
+            buffer[base_name][comp] = tensor
+            
+        elif 'mlp' in name and any(x in name for x in ['gate_proj', 'up_proj']) and 'gate_up_proj' not in name:
+            if 'gate_proj' in name:
+                comp = 'gate'
+                # Note: Qwen2 MLP usually uses gate_up_proj
+                base_name = name.replace('gate_proj', 'gate_up_proj')
+            elif 'up_proj' in name:
+                comp = 'up'
+                base_name = name.replace('up_proj', 'gate_up_proj')
+            
+            if base_name not in buffer:
+                buffer[base_name] = {}
+            buffer[base_name][comp] = tensor
+        else:
+            new_weights.append([name, tensor])
+    
+    for base_name, parts in buffer.items():
+        if 'qkv_proj' in base_name:
+            if 'q' in parts and 'k' in parts and 'v' in parts:
+                logger.info(f"Merging QKV for {base_name}")
+                merged = torch.cat([parts['q'], parts['k'], parts['v']], dim=0)
+                new_weights.append([base_name, merged])
+            else:
+                 logger.warning(f"Incomplete QKV parts for {base_name}: {list(parts.keys())}")
+                 # Fallback: add parts back individually
+                 if 'q' in parts: new_weights.append([base_name.replace('qkv_proj', 'q_proj'), parts['q']])
+                 if 'k' in parts: new_weights.append([base_name.replace('qkv_proj', 'k_proj'), parts['k']])
+                 if 'v' in parts: new_weights.append([base_name.replace('qkv_proj', 'v_proj'), parts['v']])
+                 
+        elif 'gate_up_proj' in base_name:
+            if 'gate' in parts and 'up' in parts:
+                logger.info(f"Merging GateUp for {base_name}")
+                merged = torch.cat([parts['gate'], parts['up']], dim=0)
+                new_weights.append([base_name, merged])
+            else:
+                 logger.warning(f"Incomplete GateUp parts for {base_name}: {list(parts.keys())}")
+                 if 'gate' in parts: new_weights.append([base_name.replace('gate_up_proj', 'gate_proj'), parts['gate']])
+                 if 'up' in parts: new_weights.append([base_name.replace('gate_up_proj', 'up_proj'), parts['up']])
+                 
+    return new_weights
+
 def load_quanted_weights(weights, model_runner):
     model = model_runner.model
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
+    
+    # Merge split weights to match VLLM expectation
+    weights_quantized = merge_split_fp8_weights(weights_quantized)
 
     # Monkey patch the param class to their subclass, as certain models
     # will check the param type to call the proper weightloader
@@ -202,6 +271,12 @@ def load_quanted_weights(weights, model_runner):
         if hasattr(param, "subclass_type"):
             param.orig_type = param.__class__
             param.__class__ = param.subclass_type
+    
+    # Debug: Print shapes before loading
+    logger.info(f"DEBUG: Loading {len(weights_quantized)} quantized weights")
+    for w_name, w_tensor in weights_quantized:
+        logger.info(f"Weight: {w_name}, Shape: {w_tensor.shape}")
+        
     # Finally load the weights into vllm
     loaded_params = model.load_weights(weights_quantized)
     # Undo the type change above to the original type

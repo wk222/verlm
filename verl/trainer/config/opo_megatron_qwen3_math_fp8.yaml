@@ -1,0 +1,211 @@
+# OPO Training Configuration with Megatron Backend and FP8
+# Algorithm: OPO (Orthogonalized Policy Optimization)
+# Backend: Megatron-Core with Transformer Engine FP8
+
+defaults:
+  - actor@actor_rollout_ref.actor: megatron_actor
+  - data@data: legacy_data
+  - ref@actor_rollout_ref.ref: megatron_ref
+  - rollout@actor_rollout_ref.rollout: rollout
+  - critic@critic: megatron_critic
+  - reward_model@reward_model: megatron_reward_model
+  - algorithm@algorithm.rollout_correction: rollout_correction
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: True
+  
+  # Megatron specific timeouts
+  nccl_timeout: 600
+
+  model:
+    path: Qwen/Qwen3-4B-Thinking-2507-FP8
+    external_lib: null
+    override_config: {}
+    use_fused_kernels: False
+    trust_remote_code: True
+    use_remove_padding: False # Megatron usually requires padded inputs or specific handling
+
+  actor:
+    strategy: megatron
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size: null
+    ppo_micro_batch_size_per_gpu: 2
+    ppo_epochs: 1
+    use_dynamic_bsz: False
+    use_kl_loss: False
+    
+    # OPO Loss Config
+    policy_loss:
+      loss_mode: adpo
+      num_generations: 6
+      
+    optim:
+      lr: 1e-6
+      # FP8 Optimizer Configuration
+      override_optimizer_config:
+        fp8_recipe: "blockwise"
+        
+    # Megatron Parallel Configuration (Default for 4 GPUs: TP=2, PP=1, DP=2)
+    megatron:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      virtual_pipeline_model_parallel_size: null
+      sequence_parallel: False
+      param_offload: False
+      optimizer_offload: False
+      grad_offload: False
+      
+      # FP8 Model Configuration
+      override_transformer_config:
+        fp8: "e4m3"
+        fp8_recipe: "blockwise"
+        apply_rope_fusion: True
+
+  rollout:
+    name: vllm
+    mode: sync # Reverted to sync mode
+    quantization: null # Disable FP8, use BF16
+    temperature: 1.0
+    top_k: -1
+    top_p: 1.0
+    n: 6
+    gpu_memory_utilization: 0.25
+    # Gen TP should match Train TP or be a factor usually, but VerL handles valid mesh
+    tensor_model_parallel_size: 1 # Set to 1 to match per_tensor_generator output
+    max_num_seqs: 256
+    enable_chunked_prefill: True
+    enable_prefix_caching: True
+    free_cache_engine: True
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: 8
+    do_sample: True
+
+critic:
+  enable: False # OPO often disables critic if using heuristic or not needed
+
+algorithm:
+  adv_estimator: adpo # Required for OPO
+  num_generations: 6
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: False
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+
+  # ============================================================
+  # OPO Configuration
+  # ============================================================
+  loss_variant: opo
+  
+  opo_alpha: 0.6
+  opo_mu: 1.0
+  
+  # Base ADPO Parameters
+  tau: 0.5
+  beta_reward: 0.3
+  clip_anchored_score: 10.0
+  clip_log_ratio: 5.0
+  use_length_normalization: True
+  grad_scale_factor: 20.0
+  logit_reg_coef: 0.01
+  use_q_center: False
+  adv_score_weight: 0.0
+  
+  use_adaptive_tau: True
+  adaptive_tau_alpha: 0.2
+  adaptive_tau_beta: 0.5
+  adaptive_tau_min: 0.2
+  adaptive_tau_max: 1.5
+  vocab_size: 151936 # Check if Qwen3 differs, but this is from reference
+
+  grad_clip_value: 0.0
+  scale_rewards: False
+  drop_all_failed_prompts: False
+  global_batch_size: 32
+
+data:
+  train_files: $DATA_DIR/train.parquet
+  val_files: $DATA_DIR/train.parquet
+  prompt_key: prompt
+  max_prompt_length: 1024
+  max_response_length: 1280
+  train_batch_size: 32
+  val_batch_size: 16
+  truncation: left
+  shuffle: true
+  dataloader_num_workers: 0
+
+trainer:
+  total_epochs: 2
+  project_name: ADPO-GSPO-WZX
+  experiment_name: qwen3-4b-opo-megatron-fp8
+  logger: ['wandb', 'console']
+  nnodes: 1
+  n_gpus_per_node: 4
+  save_freq: -1
+  resume_mode: auto
+  val_before_train: False
+  default_local_dir: checkpoints/qwen3-4b-opo-megatron-fp8
+  default_hdfs_dir: null
+  
+  # Megatron requires custom worker implementation sometimes, but auto should work
+  use_legacy_worker_impl: auto
+  device: cuda
+  save_each_epoch: false
+  test_freq: -1
+  seed: 42
+  total_training_steps: null
+  balance_batch: True
+  log_val_generations: 0
+  resume_from_path: null
+  val_only: False
+  critic_warmup: 0
+  del_local_ckpt_after_load: False
+  ray_wait_register_center_timeout: 300
+
+custom_reward_function:
+  path: verl/trainer/adpo/reward.py
+  name: good_accuracy
+  reward_kwargs:
+    ngram_size: 4
+    max_penalty: -0.5
+    penalty_scale_factor: 0.5
+    length_reward_scale: 2000.0
+    length_reward_max: 0.1
+    repetition_threshold: 0.3
+    repetition_threshold_penalty: -0.5
+
+reward_model:
+  enable: False
+
+wandb_config:
+  project: ADPO-GSPO-WZX
+  entity: null
+  name: qwen3-1.7b-opo-0.6-mu1.0
+  group: qwen3_opo
+  tags:
+    - opo
+    - alpha_0.6
+    - mu_1.0
+    - qwen3
+    - math
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        TOKENIZERS_PARALLELISM: "false"
+        NCCL_DEBUG: "WARN"
+        VLLM_LOGGING_LEVEL: "WARNING"
+    num_cpus: null
+  timeline_json_file: null
+
+transfer_queue:
+  enable: False
+
+global_profiler:
+  tool: none
+  steps: []
+  profile_continuous_steps: false

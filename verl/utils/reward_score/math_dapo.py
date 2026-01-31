@@ -244,7 +244,6 @@ def compute_score(
     ground_truth: str,
     strict_box_verify: bool = False,
     pause_tokens_index: Optional[list[int]] = None,
-    **kwargs,
 ) -> float:
     """Compute the reward score for a solution.
 

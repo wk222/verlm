@@ -499,9 +499,21 @@ class vLLMRollout(BaseRollout):
         else:
             from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
-            model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+            model_runner = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner
+            model = model_runner.model
             patch_vllm_moe_model_weight_loader(model)
-            model.load_weights(weights)
+            
+            if is_fp8_model(model_runner.vllm_config):
+                logger.info(f"FP8 model detected (sync): {model_runner.vllm_config.quant_config}")
+                # Convert bf16 weights to fp8 format before loading
+                loaded_params = load_quanted_weights(weights, model_runner)
+                logger.info(f"FP8 weights loaded (sync), loaded_params: {len(loaded_params)}")
+            else:
+                model.load_weights(weights)
+                logger.info("DEBUG: Standard BF16 weights loaded. Model parameters:")
+                for name, _ in model.named_parameters():
+                     logger.info(f"Param: {name}")
+                
             vllm_config = self.inference_engine.llm_engine.vllm_config.model_config
             device = next(model.parameters()).device
             process_weights_after_loading(model, vllm_config, device)

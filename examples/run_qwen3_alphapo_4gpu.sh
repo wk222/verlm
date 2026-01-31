@@ -1,17 +1,12 @@
 #!/bin/bash
-# AlphaPO Training (Adaptive ESS) - Qwen3-1.7B on WZX MATH Dataset
-# Alpha-Divergence Preference Optimization with ESS-driven adaptive alpha
-# Settings optimized for 4x4090
-
-set -e
-
+set -e  # Exit on error
 echo "=========================================="
-echo "AlphaPO Training (Adaptive ESS) - Qwen3 on 4x4090"
+echo "AlphaPO Reproduction - Qwen3 on WZX MATH (4x4090)"
 echo "=========================================="
 echo ""
 
 # Check if we're in the verlm directory
-if [ ! -d "verl/trainer" ]; then
+if [ ! -d "verl/trainer/adpo" ]; then
     echo "❌ Error: Please run this script from the verlm/ directory."
     echo "   Current directory: $(pwd)"
     exit 1
@@ -19,13 +14,12 @@ fi
 
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export CUDA_VISIBLE_DEVICES=0,1,2,3  # 4 GPUs
 
 # Configuration
 CONFIG_NAME="alphapo_qwen3_math"
-OUTPUT_DIR="data/Qwen3-1.7B-AlphaPO-Adaptive-WZX"
-DATA_DIR="data/math_level3"
+OUTPUT_DIR="data/Qwen3-1.7B-AlphaPO-alpha0.5-WZX"
+DATA_DIR="data/math_wzx"
 N_GPUS=4
 
 echo "Configuration:"
@@ -33,7 +27,6 @@ echo "  - Config: ${CONFIG_NAME}"
 echo "  - Output: ${OUTPUT_DIR}"
 echo "  - Data: ${DATA_DIR}"
 echo "  - GPUs: ${CUDA_VISIBLE_DEVICES} (${N_GPUS} GPUs)"
-echo "  - Algorithm: AlphaPO (Adaptive ESS)"
 echo ""
 
 # Download and preprocess WZX MATH dataset if not exists
@@ -47,16 +40,15 @@ else
     echo ""
 fi
 
-echo "🚀 Starting AlphaPO (Adaptive ESS) training..."
+# Run AlphaPO training
+echo "🚀 Starting AlphaPO training..."
 echo ""
 
-# 使用 main_adpo 运行 AlphaPO
-# 参数：
-# - Batch Size: 48 (Train), 24 (Val)
-# - Rollout N: 6
-# - Max Seqs: 256
-# - Epochs: 2
-# - Adaptive Alpha: ESS method
+# ============================================================
+# AlphaPO Settings
+# alpha = 0.5 (Configured in yaml)
+# ============================================================
+
 python -m verl.trainer.main_adpo \
     --config-name ${CONFIG_NAME} \
     data.train_files=${DATA_DIR}/train.parquet \
@@ -66,6 +58,7 @@ python -m verl.trainer.main_adpo \
     data.max_prompt_length=1024 \
     data.max_response_length=1280 \
     data.truncation=left \
+    algorithm.num_generations=6 \
     actor_rollout_ref.rollout.n=6 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.enforce_eager=False \
@@ -80,17 +73,15 @@ python -m verl.trainer.main_adpo \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    algorithm.num_generations=6 \
     trainer.n_gpus_per_node=${N_GPUS} \
     trainer.default_local_dir=${OUTPUT_DIR} \
-    trainer.total_epochs=2 \
     trainer.project_name="ADPO-GSPO-WZX" \
-    trainer.experiment_name=qwen3-1.7b-alphapo-adaptive-ess-4gpu \
+    trainer.experiment_name=qwen3-1.7b-alphapo-alpha0.5-wzx-4gpu \
     wandb_config.project="ADPO-GSPO-WZX" \
-    wandb_config.name=qwen3-1.7b-alphapo-adaptive-ess-4gpu \
-    "$@"
+    wandb_config.name=qwen3-1.7b-alphapo-alpha0.5-wzx-4gpu \
+    "$@"  # Pass any additional arguments
 
 echo ""
 echo "=========================================="
-echo "✅ AlphaPO (Adaptive ESS) Training Complete!"
+echo "✅ AlphaPO Training Complete!"
 echo "=========================================="
