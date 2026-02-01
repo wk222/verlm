@@ -102,6 +102,7 @@ algorithm:
   # -------------------------------------------------------
   opo_alpha: 0.75                 # Higher alpha = more aggressive, chase q distribution
   opo_mu: 0.5                     # Lower mu = less conservative anchor regularization
+  opo_direction_scale: 1.33       # Decoupled scale for term1 (approx 1/0.75). Fixes update magnitude while alpha tunes geometry.
   
   # Base ADPO Parameters
   tau: 0.5
