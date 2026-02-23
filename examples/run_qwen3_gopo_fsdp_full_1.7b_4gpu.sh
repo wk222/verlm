@@ -2,7 +2,7 @@
 set -e
 
 echo "=========================================="
-echo "OPO Training - Qwen3-1.7B FSDP Full FT on 4 GPUs"
+echo "GOPO Training - Qwen3-1.7B FSDP Full FT on 4 GPUs"
 echo "=========================================="
 echo ""
 
@@ -21,7 +21,7 @@ export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 
 # Configuration
 CONFIG_NAME="opo_qwen3_math.yaml"
-OUTPUT_DIR="data/Qwen3-1.7B-OPO-FSDP-Full-FT"
+OUTPUT_DIR="data/Qwen3-1.7B-GOPO-FSDP-Full-FT"
 DATA_DIR="data/math_level3"
 # Use Qwen3-1.7B model
 MODEL_PATH="Qwen/Qwen3-1.7B"
@@ -59,19 +59,20 @@ else
     echo ""
 fi
 
-echo "🚀 Starting OPO training..."
+echo "🚀 Starting GOPO training..."
 echo ""
 
 python3 -m verl.trainer.main_adpo \
     trainer.default_local_dir=${OUTPUT_DIR} \
     trainer.project_name=ADPO-GSPO-WZX \
-    trainer.experiment_name=qwen3-1.7b-opo-fsdp-full-ft \
+    trainer.experiment_name=qwen3-1.7b-gopo-fsdp-full-ft \
     trainer.n_gpus_per_node=${N_GPUS} \
     data.train_files=${DATA_DIR}/train.parquet \
     data.val_files=${VAL_DATA_DIR}/test.parquet \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.use_shm=True \
     actor_rollout_ref.actor.policy_loss.num_generations=6 \
+    actor_rollout_ref.actor.policy_loss.loss_variant=gopo \
     actor_rollout_ref.rollout.n=6 \
     algorithm.num_generations=6 \
     actor_rollout_ref.rollout.load_format=safetensors \

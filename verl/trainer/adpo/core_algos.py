@@ -937,6 +937,30 @@ def adpo_policy_loss(
             term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
             u_center_val = u_center.mean().detach()
 
+        elif loss_variant == "gopo":
+            # =====================================================
+            # Group Orthogonalized Policy Optimization (GOPO)
+            # L = 1/G * sum( ReLU( -A_i * rho_i + (mu/2) * (rho_i - 1)^2 ) )
+            # =====================================================
+            alpha = effective_alpha
+            eps = 1e-10
+
+            log_ratio_grouped = log_ratio[sorted_idx].view(num_prompts, num_generations)
+            rho = torch.exp(log_ratio_grouped)
+            adv = adv_grouped.detach()
+            
+            # Bounded Hilbert Projection (BHP) Loss
+            # ReLU creates a dead-zone when rho approaches 0 for very negative advantages
+            loss_gopo = torch.nn.functional.relu(-adv * rho + 0.5 * opo_mu * (rho - 1.0)**2)
+            
+            loss = loss_gopo.mean()
+            
+            # Metrics
+            log_Z = torch.logsumexp(u_grouped, dim=-1)
+            term_alignment = (adv * rho).sum(dim=-1).mean().detach()
+            term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
+            u_center_val = u_center.mean().detach()
+
         elif loss_variant == "opo":
             # =====================================================
             # Orthogonalized Policy Optimization (OPO)
@@ -1999,6 +2023,30 @@ def adpo_policy_loss(
             
             # Metrics
             term_alignment = (q_grouped.detach() * u_centered).sum(dim=-1).mean().detach()
+            term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
+            u_center_val = u_center.mean().detach()
+
+        elif loss_variant == "gopo":
+            # =====================================================
+            # Group Orthogonalized Policy Optimization (GOPO)
+            # L = 1/G * sum( ReLU( -A_i * rho_i + (mu/2) * (rho_i - 1)^2 ) )
+            # =====================================================
+            alpha = effective_alpha
+            eps = 1e-10
+
+            log_ratio_grouped = log_ratio[sorted_idx].view(num_prompts, num_generations)
+            rho = torch.exp(log_ratio_grouped)
+            adv = adv_grouped.detach()
+            
+            # Bounded Hilbert Projection (BHP) Loss
+            # ReLU creates a dead-zone when rho approaches 0 for very negative advantages
+            loss_gopo = torch.nn.functional.relu(-adv * rho + 0.5 * opo_mu * (rho - 1.0)**2)
+            
+            loss = loss_gopo.mean()
+            
+            # Metrics
+            log_Z = torch.logsumexp(u_grouped, dim=-1)
+            term_alignment = (adv * rho).sum(dim=-1).mean().detach()
             term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
             u_center_val = u_center.mean().detach()
 
