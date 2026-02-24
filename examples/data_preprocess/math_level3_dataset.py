@@ -4,15 +4,12 @@ import pandas as pd
 from datasets import load_dataset
 from verl.utils.hdfs_io import copy, makedirs
 
-def preprocess_dataset(local_save_dir):
-    # Load dataset from HuggingFace
+def preprocess_dataset(local_save_dir, sample_ratio=1.0, seed=42):
     dataset_name = "wzx111/MATH-lighteval-level3"
     print(f"Loading dataset {dataset_name}...")
     
-    # This dataset usually has 'train' and 'test' splits
     dataset = load_dataset(dataset_name)
     
-    # Define splits to process
     splits = ['train', 'test'] if 'test' in dataset else ['train']
     
     for split in splits:
@@ -22,8 +19,12 @@ def preprocess_dataset(local_save_dir):
         print(f"Processing split: {split}")
         ds = dataset[split]
         
-        # Convert to pandas for easier manipulation
         df = ds.to_pandas()
+        
+        if sample_ratio < 1.0:
+            n_before = len(df)
+            df = df.sample(frac=sample_ratio, random_state=seed).reset_index(drop=True)
+            print(f"Sampled {len(df)}/{n_before} rows (ratio={sample_ratio}, seed={seed})")
         
         # Ensure required columns exist
         # VERL expects: data_source, prompt, ability, reward_model, extra_info
@@ -102,6 +103,8 @@ def preprocess_dataset(local_save_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_save_dir", default="data/math_level3", help="Directory to save processed parquet files")
+    parser.add_argument("--sample_ratio", type=float, default=1.0, help="Fraction of data to sample (0-1)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling")
     args = parser.parse_args()
     
-    preprocess_dataset(args.local_save_dir)
+    preprocess_dataset(args.local_save_dir, sample_ratio=args.sample_ratio, seed=args.seed)

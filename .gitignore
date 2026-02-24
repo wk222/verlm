@@ -1,6 +1,8 @@
 
 **/*.pt
 **/checkpoints
+data/
+logs_benchmark/
 **/wget-log
 **/_build/
 **/*.ckpt
