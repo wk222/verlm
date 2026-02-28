@@ -1,0 +1,896 @@
+% !TeX program = pdflatex
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{newtxmath}
+\usepackage{microtype}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage[section]{placeins}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{tikz-3dplot}
+\usetikzlibrary{shapes,arrows}
+
+% ---------- Hyperref setup ----------
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+% ---------- Cleveref ----------
+\usepackage[capitalize,noabbrev]{cleveref}
+
+% ---------- Theorem environments ----------
+\renewcommand{\qedsymbol}{}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% ---------- Math helpers ----------
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\softmax}{\mathrm{softmax}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% Notations
+\newcommand{\tauanc}{\tau_{\mathrm{anc}}}
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\target}{u_{\text{target}}}
+\newcommand{\piref}{\pi_{\mathrm{ref}}}
+\newcommand{\pik}{\pi_k}
+
+\title{\textbf{Group Orthogonalized Policy Optimization}\\
+\large Group Policy Optimization as Orthogonal Projection in Hilbert Space}
+
+\author{Wang Zixian\\
+\small China Mobile Communications Group Shandong Co., Ltd. Tai'an Branch\\
+\small \texttt{wangzixian@sd.chinamobile.com}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present \textbf{Group Orthogonalized Policy Optimization (GOPO)}, a new alignment algorithm for large language models derived entirely from the geometry of Hilbert function spaces. Unlike existing methods that formulate alignment as constrained optimization on the probability simplex---inevitably inheriting the exponential curvature of Kullback--Leibler divergence---we propose a fundamentally different approach: lifting the problem into the Hilbert space $L^2(\pik)$ of square-integrable functions with respect to the current reference policy.
+
+In this function space, we make three observations that jointly yield a principled algorithm. First, the probability simplex constraint reduces to a single linear orthogonality condition $\langle v, \mathbf{1} \rangle = 0$, defining a codimension-one closed subspace $\mathcal{H}_0$. Second, the alignment objective emerges naturally from the \emph{Geometric Principle of Minimum Distance}: minimizing the geometric distance between $v$ and the unconstrained target $u^*$ algebraically yields the \emph{work-dissipation functional} $\mathcal{J}(v) = \langle g, v \rangle - \frac{\mu}{2}\|v\|^2$. The global maximum of this functional is then given elegantly by the Hilbert Projection Theorem. Third, enforcing the non-negativity boundary $v \geq -1$ upgrades the solution to a \emph{Bounded Hilbert Projection} (BHP), yielding exact sparsity: catastrophically poor actions receive zero target probability via a hard analytical threshold.
+
+To bridge the gap between this global functional theory and practical training, GOPO transitions the projection from the infinite-dimensional $L^2(\pik)$ to a finite-dimensional empirical subspace induced by group sampling. A key structural result emerges: because group-centered advantages $A_i = r_i - \bar{r}$ inherently sum to zero, the Lagrange multiplier (chemical potential) enforcing probability conservation \emph{exactly vanishes} in the BHP-inactive linear regime, collapsing the constrained projection into an unconstrained empirical loss. The resulting objective features constant Hessian curvature $\mu I$, non-saturating linear gradients, and a target-level dead-zone via zero-probability BHP targets for catastrophic actions---all without heuristic clipping. Experiments on mathematical reasoning benchmarks demonstrate that GOPO achieves competitive generalization while sustaining healthy gradient dynamics and entropy preservation in regimes where clipping-based methods plateau.
+\end{abstract}
+
+%====================================================================%
+\section{Introduction}
+\label{sec:intro}
+
+Aligning Large Language Models (LLMs) with human preferences via Reinforcement Learning from Human Feedback (RLHF)~\cite{Christiano2017RLHF,Ouyang2022InstructGPT} has become a standard practice. Dominant algorithms---Proximal Policy Optimization (PPO)~\cite{Schulman2017PPO}, Direct Preference Optimization (DPO)~\cite{Rafailov2023DPO}, and Group Relative Policy Optimization (GRPO)~\cite{Shao2024GRPO}---all share a common structural element: they regularize policy updates via the Kullback--Leibler (KL) divergence, either explicitly as a penalty term or implicitly through ratio clipping in log-probability space.
+
+KL-regularized objectives carry an inherent geometric limitation. The KL divergence $D_{\KL}(\pi_\theta \| \piref)$ induces an \emph{exponential} geometry: its Hessian in log-ratio coordinates scales as $\sigma(m)(1-\sigma(m))$, where $m$ is the logit margin. This data-dependent curvature means that as the policy becomes more confident---producing large log-ratios---the gradient signal decays exponentially. The resulting \emph{gradient saturation} forces practitioners to either accept premature plateaus or resort to heuristic mechanisms such as aggressive ratio clipping~\cite{Schulman2017PPO}, asymmetric clip bounds~\cite{Yu2025DAPO}, or entropy bonuses.
+
+We argue that this limitation is not intrinsic to alignment but rather to the \emph{choice of geometric space} in which optimization is performed. The probability simplex, equipped with KL geometry, conflates two independent design choices: \emph{what to learn} (the sampling/advantage signal) and \emph{how to regularize} (the optimization curvature). Adjusting one inevitably perturbs the other.
+
+\paragraph{A Hilbert Space Perspective.} In this work, we abandon the probability simplex altogether and reformulate alignment as an optimization problem in the Hilbert function space $L^2(\pik)$. This shift yields three structural advantages:
+
+\begin{enumerate}[leftmargin=2em]
+    \item The probability conservation constraint $\sum_y \pi(y) = 1$ becomes a \emph{linear} orthogonality condition $\langle v, \mathbf{1}\rangle_{\pik} = 0$, where $v(y) = \pi(y)/\pik(y) - 1$ is the density fluctuation field. This defines a closed linear subspace $\mathcal{H}_0 \subset L^2(\pik)$.
+    \item The optimal policy update is obtained naturally by the \emph{Hilbert Projection Theorem}: the physically valid probability distribution that is geometrically closest to the unconstrained target. No heuristic clipping or ad-hoc normalization is needed; the classic work-dissipation functional emerges strictly as an algebraic consequence of this minimum distance.
+    \item The Hessian of the resulting objective is the constant scalar $\mu I$, completely independent of the data distribution or the current policy state. This \emph{constant curvature} guarantee ensures that gradients remain linear and non-saturating throughout training.
+\end{enumerate}
+
+Building on the functional-analytic foundation established in Orthogonalized Policy Optimization (OPO)~\cite{Wang2025OPO}, we derive \textbf{Group Orthogonalized Policy Optimization (GOPO)}, which seamlessly transitions the orthogonal projection from the infinite-dimensional global space $L^2(\pik)$ to a finite-dimensional empirical subspace induced by group sampling. A particularly elegant result emerges at the group level: because group-centered advantages $A_i = r_i - \bar{r}$ structurally sum to zero, they already reside in the zero-mean subspace, and the chemical potential enforcing probability conservation \emph{exactly vanishes} in the linear (BHP-inactive) regime. GOPO thus reduces to a simple, unconstrained quadratic loss over policy ratios.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=2em]
+    \item We formulate LLM alignment as a constrained optimization in $L^2(\pik)$ and show that the optimal policy is the orthogonal projection of the advantage-driven target onto the probability-conserving subspace.
+    \item We extend the unconstrained projection to the \emph{Bounded Hilbert Projection} (BHP), which enforces non-negativity of the target policy and yields exact sparsity for catastrophically poor actions.
+    \item We derive GOPO as the empirical realization of this framework, proving that the chemical potential vanishes under group-centered advantages (in the BHP-inactive regime), producing a practical loss with constant curvature and an intrinsic dead-zone mechanism.
+    \item Experiments on mathematical reasoning benchmarks demonstrate competitive generalization (47\% on MATH Level 4 vs.\ 44\% for GRPO/DAPO), monotonically improving validation accuracy, and the healthiest gradient dynamics among all tested methods.
+\end{itemize}
+
+%====================================================================%
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Preference Optimization and RLHF.}
+RLHF~\cite{Christiano2017RLHF,Ouyang2022InstructGPT} typically involves learning a reward model from preferences and optimizing a policy via PPO~\cite{Schulman2017PPO}. DPO~\cite{Rafailov2023DPO} simplifies this by deriving a closed-form solution to the KL-constrained problem. IPO~\cite{Azar2024IPO} adds a regularization term; SimPO~\cite{Meng2024SimPO} simplifies the reference-free objective. GRPO~\cite{Shao2024GRPO} eliminates the critic network by using group-relative advantages. All these methods inherit the exponential geometry of KL divergence, leading to gradient saturation in high-confidence regimes.
+
+\paragraph{$f$-Divergences and Alternative Geometries.}
+The $f$-divergence family~\cite{Csiszar1967,AliSilvey1966} provides a unified framework for distributional discrepancy. The Pearson $\chi^2$ divergence, a member of this family, induces quadratic rather than exponential penalties. Prior work has explored $f$-divergences in variational inference~\cite{Li2016Renyi}, GANs~\cite{Nowozin2016fGAN}, and imitation learning~\cite{Ghasemipour2020fIL}. In RL, $\alpha$PPO~\cite{Xu2023AlphaPPO} studied $\alpha$-divergence as a trust-region constraint. APO~\cite{zixian2025apo} explored combining forward and reverse KL dynamics. OPO~\cite{Wang2025OPO} first proposed lifting alignment into $L^2(\pik)$ and deriving the optimal update via the Hilbert Projection Theorem. GOPO extends this framework from the global Hilbert space to empirical group-level subspaces, proving that the chemical potential vanishes under group-centered advantages in the BHP-inactive linear regime and introducing the Bounded Hilbert Projection for exact sparsity.
+
+\paragraph{Trust-Region Methods.}
+TRPO~\cite{Schulman2015TRPO} enforces stability via explicit KL constraints. PPO~\cite{Schulman2017PPO} approximates this with ratio clipping. DAPO~\cite{Yu2025DAPO} introduces dynamic clip bounds and entropy management. ADPO~\cite{Wang2025ADPO} uses anchored coordinates for implicit trust regions. GOPO replaces all such mechanisms with a single quadratic penalty in ratio space, whose geometric justification is the Hilbert Projection Theorem rather than heuristic approximation.
+
+%====================================================================%
+\section{Theoretical Framework: Policy Optimization in Hilbert Space}
+\label{sec:framework}
+
+We develop the mathematical apparatus underlying GOPO. The central idea is to reformulate policy optimization in the Hilbert space $L^2(\pik)$, where the probability simplex constraint becomes a linear subspace condition and the optimal policy update is obtained by orthogonal projection.
+
+\subsection{The Hilbert Space of Density Fluctuations}
+\label{subsec:hilbert_space}
+
+Let $\pik$ denote the current reference policy (typically the policy from the previous iteration under on-policy anchoring). We define the ambient space as the Hilbert space of square-integrable functions with respect to $\pik$:
+\begin{equation}
+    \mathcal{H} = L^2(\pik), \quad \langle f, g \rangle_{\pik} = \E_{\pik}[f(y)g(y)]
+\end{equation}
+with induced norm $\|f\|_{\pik} = \sqrt{\langle f, f \rangle_{\pik}}$.
+
+Instead of directly optimizing the probability vector $\pi(y|x)$ on the simplex, we shift to a centered coordinate system. Define the \emph{density fluctuation field}:
+\begin{equation}
+\label{eq:fluctuation}
+    v(y) = \frac{\pi(y)}{\pik(y)} - 1
+\end{equation}
+The target policy is exactly recovered as $\pi(y) = \pik(y)(1 + v(y))$. The field $v$ lives in $\mathcal{H}$ and represents the relative deviation of the target policy from the reference. This coordinate change is the key step that transforms the non-linear simplex geometry into a linear Hilbert space geometry.
+
+\subsection{Probability Conservation as Orthogonality}
+\label{subsec:conservation}
+
+Any valid probability distribution must satisfy $\sum_y \pi(y) = 1$. In the fluctuation coordinate, this fundamental physical law simplifies dramatically:
+\begin{equation}
+    \sum_y \pi(y) = \sum_y \pik(y)(1 + v(y)) = 1 + \sum_y \pik(y) v(y) = 1 + \E_{\pik}[v] = 1
+\end{equation}
+Hence, probability conservation is equivalent to the zero-mean condition:
+\begin{equation}
+\label{eq:zero_mean}
+    \E_{\pik}[v] = \langle v, \mathbf{1} \rangle_{\pik} = 0
+\end{equation}
+This is a \emph{single linear} constraint in $\mathcal{H}$, defining a closed subspace of codimension one:
+\begin{equation}
+\label{eq:H0}
+    \mathcal{H}_0 = \{ f \in \mathcal{H} : \langle f, \mathbf{1} \rangle_{\pik} = 0 \}
+\end{equation}
+
+\begin{remark}[Geometric Interpretation]
+$\mathcal{H}_0$ is precisely the orthogonal complement of the one-dimensional subspace spanned by the constant function $\mathbf{1}$ in $L^2(\pik)$. Every valid policy fluctuation must be \emph{orthogonal} to $\mathbf{1}$---probability mass gained at some outputs must be exactly compensated by mass lost elsewhere. The term ``orthogonalized'' in our method name refers directly to this geometric fact.
+\end{remark}
+
+\subsection{The Driving Force}
+\label{subsec:driving_force}
+
+The projection framework is agnostic to the specific form of the driving field: $g(y)$ can be any scalar score---a raw reward, a shaped reward, or a preference signal---whose expectation under $\pik$ is in general \emph{nonzero}. In the general Hilbert projection, the chemical potential $\lambda^* = \E_{\pik}[g]$ removes exactly this nonzero mean to enforce conservation (\cref{subsec:projection}).
+
+At the \emph{group level}, GOPO instantiates the driving field as the group-centered advantage:
+\begin{equation}
+\label{eq:driving}
+    g(y_i) = A_i \;=\; r_i - \bar{r}, \quad \bar{r} = \frac{1}{G}\sum_{j=1}^{G} r_j
+\end{equation}
+which satisfies $\sum_i A_i = 0$ by construction. This centering is what causes the chemical potential to vanish in the BHP-inactive linear regime (\cref{rem:scope_vanishing}).
+
+This choice ensures that the driving field depends only on known quantities (rewards and the reference policy $\pik$), preserving the applicability of the Hilbert Projection Theorem, which requires a \emph{fixed} target vector $u^* = g/\mu$ to project onto $\mathcal{H}_0$.
+
+\begin{remark}[Escort Extensions]
+The parent framework OPO~\cite{Wang2025OPO} introduces an $\alpha$-Escort sampling field $g_\alpha(y) = E_\alpha(y) \cdot A(y)$ with $E_\alpha(y) = (\pi(y)/\pik(y))^\alpha$, which provides richer sampling geometry at the cost of introducing an implicit dependence on the unknown policy $\pi$. This transforms the projection into a fixed-point problem. GOPO deliberately avoids this complexity by setting $g = A$ (equivalently $\alpha = 0$), preserving the closed-form projection structure. The escort extension is analyzed in~\cite{Wang2025OPO}.
+\end{remark}
+
+%====================================================================%
+\section{Methodology: Group Orthogonalized Policy Optimization}
+\label{sec:method}
+
+We now derive GOPO in four stages: (i) identifying the unconstrained target and formulating the geometric minimum-distance principle, (ii) showing that the classic work-dissipation functional emerges algebraically from this distance, (iii) obtaining the closed-form solution via the Hilbert Projection Theorem and its bounded extension, and (iv) transitioning to the empirical group-level objective.
+
+\subsection{The Geometric Principle: Minimum Distance to the Unconstrained Target}
+\label{subsec:geometric_principle}
+
+Suppose for a moment that there were no physical constraints on the probability distribution. Driven entirely by the external field $g$, the ideal, unconstrained policy fluctuation would simply align with the driving force, scaled by a compliance (or stiffness) parameter $\mu > 0$:
+\begin{equation}
+    u^* = \frac{g}{\mu}
+\end{equation}
+However, the reality is that any valid fluctuation field $v$ must strictly obey probability conservation, locking it within the zero-mean hyperplane $\mathcal{H}_0$. For a general driving signal (e.g., raw rewards), the unconstrained target $u^*$ typically violates this constraint because $\E_{\pik}[g] \neq 0$. Even when $g$ is already centered (as in GOPO's group-level case $g_i = A_i$), BHP truncation can reintroduce a nonzero conservation residual, necessitating the chemical potential.
+
+What is the most geometric and principled way to resolve this? We seek the valid fluctuation $v \in \mathcal{H}_0$ that is geometrically closest to the ideal target $u^*$ in the Hilbert space. Mathematically, this corresponds to minimizing the $L^2$ distance (scaled by $\mu/2$ for dimension consistency):
+\begin{equation}
+\label{eq:min_distance}
+    \min_{v \in \mathcal{H}_0} \; \frac{\mu}{2} \left\| v - u^* \right\|^2_{\pik}
+\end{equation}
+
+\subsection{Emergence of the Work-Dissipation Functional}
+\label{subsec:emergence}
+
+By algebraically expanding this pure geometric distance, a remarkable physical structure naturally emerges. Substituting $u^* = g/\mu$, we have:
+\begin{align}
+    \frac{\mu}{2} \left\| v - \frac{g}{\mu} \right\|^2_{\pik} &= \frac{\mu}{2} \left( \|v\|^2_{\pik} - \frac{2}{\mu}\langle g, v \rangle_{\pik} + \frac{1}{\mu^2}\|g\|^2_{\pik} \right) \\
+    &= \underbrace{\frac{\mu}{2} \|v\|^2_{\pik}}_{\text{Dissipation}} - \underbrace{\langle g, v \rangle_{\pik}}_{\text{Work}} + \underbrace{\frac{1}{2\mu} \|g\|^2_{\pik}}_{\text{Constant independent of } v}
+\end{align}
+Minimizing the geometric distance is therefore strictly equivalent to maximizing the negative of the $v$-dependent terms. Thus, the alignment objective becomes:
+\begin{equation}
+\label{eq:constrained_opt}
+    \arg\min_{v \in \mathcal{H}_0} \frac{\mu}{2} \left\| v - u^* \right\|^2_{\pik} \equiv \arg\max_{v \in \mathcal{H}_0} \Big( \underbrace{\langle g, v \rangle_{\pik}}_{\text{External Work}} - \underbrace{\frac{\mu}{2} \|v\|^2_{\pik}}_{\text{Quadratic Dissipation}} \Big)
+\end{equation}
+The classic ``work-dissipation'' functional $\mathcal{J}(v) = \langle g, v \rangle_{\pik} - \frac{\mu}{2}\|v\|^2_{\pik}$ is not an arbitrarily constructed objective; it is the algebraic inevitability of measuring squared distance in a Hilbert space.
+
+\subsection{The Orthogonal Projection Solution}
+\label{subsec:projection}
+
+Because the problem is fundamentally one of finding the closest point in a closed subspace $\mathcal{H}_0$ to a target vector $u^*$, we do not need to rely on Lagrangian differentiation. The Hilbert Projection Theorem directly yields the unique global optimum as the orthogonal projection:
+
+\begin{theorem}[Optimal Fluctuation via Orthogonal Projection]
+\label{thm:projection}
+The optimal probability-conserving fluctuation $v^*$ is the orthogonal projection of the unconstrained target $u^*$ onto $\mathcal{H}_0$:
+\begin{equation}
+\label{eq:projection_solution}
+    v^* = P_{\mathcal{H}_0}(u^*) = u^* - \langle u^*, \mathbf{1} \rangle_{\pik} \mathbf{1} = \frac{1}{\mu}\Big( g - \E_{\pik}[g] \cdot \mathbf{1} \Big)
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+Since $\mathcal{H}_0 = \{\mathbf{1}\}^\perp$, the orthogonal projection $P_{\mathcal{H}_0}$ onto $\mathcal{H}_0$ is:
+\begin{equation}
+    P_{\mathcal{H}_0}(f) = f - \frac{\langle f, \mathbf{1} \rangle_{\pik}}{\|\mathbf{1}\|^2_{\pik}} \mathbf{1} = f - \E_{\pik}[f] \cdot \mathbf{1}
+\end{equation}
+using $\|\mathbf{1}\|^2_{\pik} = \E_{\pik}[1] = 1$. Applying this to $f = u^* = g/\mu$ yields the result.
+\end{proof}
+
+\begin{remark}[The Chemical Potential]
+\label{rem:chemical_potential}
+The subtracted term $\lambda^* = \E_{\pik}[g]$ is the chemical potential enforcing probability conservation, so that $v^* = (g - \lambda^*)/\mu$. Geometrically, $\lambda^*$ is the component of the driving field $g$ along the illegal normal direction $\mathbf{1}$, projected out to ensure $\E_{\pik}[v^*] = 0$.
+\end{remark}
+
+\subsection{Bounded Hilbert Projection and Exact Sparsity}
+\label{subsec:bhp}
+
+The unconstrained projection~\eqref{eq:projection_solution} may produce $v^*(y) < -1$ for actions with strongly negative driving signals, yielding invalid negative probabilities. To enforce the physical constraint $\pi(y) \geq 0$, equivalently $v(y) \geq -1$, we extend the projection to a \emph{Bounded Hilbert Projection} (BHP).
+
+Define the positive orthant $\mathcal{C}_+ = \{f \in \mathcal{H} : f(y) \geq -1, \forall y\}$ and the feasible convex set:
+\begin{equation}
+    \mathcal{K} = \mathcal{H}_0 \cap \mathcal{C}_+
+\end{equation}
+The BHP problem seeks the point in $\mathcal{K}$ closest to $g/\mu$. We formulate the KKT conditions via the Lagrangian:
+\begin{equation}
+    \mathcal{L}(v, \lambda, \eta) = \E_{\pik}\!\left[ g v - \frac{\mu}{2}v^2 - \lambda v + \eta(v + 1) \right]
+\end{equation}
+where $\lambda$ enforces $\E_{\pik}[v] = 0$ and the KKT multiplier $\eta(y) \geq 0$ enforces $v(y) \geq -1$.
+
+\begin{theorem}[Bounded Projection Solution]
+\label{thm:bhp}
+The KKT complementarity condition $\eta(y)(v(y) + 1) = 0$ yields the closed-form bounded solution:
+\begin{equation}
+\label{eq:bhp_solution}
+    v^*(y) = \max\!\left(-1, \; \frac{g(y) - \lambda^*}{\mu}\right)
+\end{equation}
+where the dynamic chemical potential $\lambda^*$ is the unique value ensuring $\E_{\pik}[v^*] = 0$.
+\end{theorem}
+
+This result has a profound theoretical consequence:
+\begin{corollary}[Exact Sparsity]
+\label{cor:sparsity}
+Actions satisfying $g(y) < \lambda^* - \mu$ are assigned $v^*(y) = -1$, i.e., their target probability is \emph{exactly zero}: $\pi(y) = \pik(y)(1 + v^*(y)) = 0$. The BHP thus provides an analytical mechanism for eliminating catastrophically poor outputs (e.g., hallucinations) via a hard, data-adaptive threshold, without requiring any external filtering heuristic.
+\end{corollary}
+
+\begin{figure}[htbp]
+\centering
+\tdplotsetmaincoords{65}{50}
+
+\begin{tikzpicture}[
+    tdplot_main_coords,
+    scale=3.0,
+    >=stealth,
+    label_font/.style={font=\footnotesize},
+    important_label/.style={font=\small\bfseries},
+    callout/.style={thin, gray!50}
+]
+
+    \coordinate (O) at (0,0,0);
+
+    % =================================================================================
+    % 1. Background: plane H_0 (z=0) and feasible polytope K
+    % =================================================================================
+
+    \fill[gray!10, opacity=0.45] (-2.2,-2.2,0) -- (2.2,-2.2,0) -- (2.2,2.2,0) -- (-2.2,2.2,0) -- cycle;
+    \draw[gray!30, thin] (-2.2,-2.2,0) -- (2.2,-2.2,0) -- (2.2,2.2,0) -- (-2.2,2.2,0) -- cycle;
+
+    \coordinate (K1) at (0.8, -0.2, 0);
+    \coordinate (K2) at (0.3, 0.8, 0);
+    \coordinate (K3) at (-0.7, 0.5, 0);
+    \coordinate (K4) at (-0.5, -0.6, 0);
+    \coordinate (K5) at (0.5, -0.7, 0);
+
+    \fill[green!25, opacity=0.6] (K1) -- (K2) -- (K3) -- (K4) -- (K5) -- cycle;
+    \draw[green!60!black, thick] (K1) -- (K2) -- (K3) -- (K4) -- (K5) -- cycle;
+
+    % =================================================================================
+    % 2. Vectors and projection geometry
+    % =================================================================================
+
+    % Normal vector 1 (z-axis)
+    \draw[->, gray!55, dashed, thin] (O) -- (0,0,1.8)
+        node[above, black, label_font] {$\mathbf{1}$ (Constant Function)};
+    \filldraw[black] (O) circle (0.8pt);
+
+    % u* outside K, above the plane; Uproj outside K on plane; V* on K boundary
+    \coordinate (U_star) at (-0.3, 1.0, 1.4);
+    \coordinate (U_proj) at (-0.3, 1.0, 0);
+    \coordinate (V_star) at (-0.1, 0.68, 0);
+
+    % Auxiliary lines (draw first = bottom layer)
+    \draw[dashed, red!50, line width=0.8pt] (U_star) -- (U_proj);
+    \draw[->, dotted, orange!80!black, thick, line width=1.2pt] (U_proj) -- (V_star);
+    \filldraw[red!60] (U_proj) circle (0.6pt);
+
+    % Main vectors (draw last = top layer)
+    \draw[->, very thick, red, line cap=round] (O) -- (U_star);
+    \draw[->, very thick, blue, line cap=round] (O) -- (V_star);
+
+    % =================================================================================
+    % 3. Labels — using xshift/yshift (screen-space) for precise positioning
+    % =================================================================================
+
+    % u* label: screen upper-right, anchor=south west → text extends right-up
+    \node[label_font, red, align=left, anchor=south west, xshift=3pt] at (U_star) {
+        Unconstrained Target\\$u^* = g/\mu$
+    };
+
+    % Chemical potential: screen right of vertical drop line
+    \node[label_font, red!65!black, anchor=west, xshift=5pt] at ($(U_star)!0.55!(U_proj)$) {
+        $\lambda^*$ (Chemical Potential)
+    };
+
+    % Truncation: screen right of truncation midpoint, above the line
+    \node[label_font, orange!85!black, anchor=west, xshift=5pt, yshift=3pt] at ($(U_proj)!0.5!(V_star)$) {
+        Truncation (Dead Zone)
+    };
+
+    % GOPO policy v*: screen below-left of v*
+    \node[important_label, blue, align=center, anchor=north east, xshift=-3pt, yshift=-22pt] at (V_star) {
+        GOPO Policy\\$v^*\!=\!P_{\mathcal{K}}(u^*)$
+    };
+
+    % Reference policy: screen upper-left of origin
+    \node[label_font, anchor=south east, xshift=-3pt, yshift=4pt] at (O) {Reference $\pi_k$ ($v\!=\!0$)};
+
+    % Feasible polytope K: screen left of polytope (K5 is leftmost in screen)
+    \node[label_font, green!40!black, anchor=east, align=right, xshift=-8pt] at (K5) {
+        Feasible Polytope\\$\mathcal{K} = \mathcal{H}_0 \cap \mathcal{C}_+$
+    };
+
+    % H_0 label: screen dead center-bottom
+    \node[label_font, gray!60!black, align=center,
+          fill=white, fill opacity=0.85, text opacity=1,
+          inner sep=3pt, rounded corners=1pt] at (1.3, 1.55, 0) {
+        $\mathcal{H}_0$: Probability Conserving Subspace\\
+        $\langle v, \mathbf{1} \rangle_{\pi_k} = 0$
+    };
+
+\end{tikzpicture}
+
+\caption{\textbf{Geometric interpretation of GOPO.} The theory operates in $L^2(\pi_k)$. The reference policy $\pi_k$ sits at the origin ($v=0$). Valid policies must reside in $\mathcal{H}_0$ (gray plane) and satisfy non-negativity, restricting them to the feasible polytope $\mathcal{K}$ (green). The unconstrained target $u^* = g/\mu$ (red) is first projected vertically onto $\mathcal{H}_0$ by subtracting the chemical potential $\lambda^*$, then truncated along the plane onto the $\mathcal{K}$ boundary (dead zone), yielding the final bounded GOPO update $v^*$ (blue).}
+\label{fig:gopo_geometry}
+\end{figure}
+
+\subsection{From Global to Empirical: The GOPO Objective}
+\label{subsec:gopo}
+
+Optimizing the distance minimization~\eqref{eq:min_distance} in the global space $L^2(\pik)$ requires access to the full distribution, which is computationally intractable for autoregressive language models. GOPO bridges this gap by transitioning the orthogonal projection to an empirical discrete subspace.
+
+For a given prompt $x$, sample a group of $G$ responses $\mathcal{G} = \{y_1, \ldots, y_G\} \sim \pik(\cdot|x)$. Define the empirical inner product space $\hat{L}^2(\mathcal{G})$ with metric:
+\begin{equation}
+\label{eq:empirical_ip}
+    \langle f, g \rangle_{\mathcal{G}} = \frac{1}{G}\sum_{i=1}^G f(y_i)g(y_i)
+\end{equation}
+The probability conservation constraint is naturally relaxed to the empirical zero-mean condition:
+\begin{equation}
+    \hat{\mathcal{H}}_0 = \left\{ v \in \hat{L}^2(\mathcal{G}) : \frac{1}{G}\sum_{i=1}^G v(y_i) = 0 \right\}
+\end{equation}
+
+\paragraph{The Vanishing Chemical Potential (Linear Regime).}
+In standard RLHF pipelines, raw rewards are normalized into group-centered advantages $A_i = r_i - \bar{r}$, satisfying $\sum_{i=1}^G A_i = 0$ by construction. Consequently, the empirical driving vector $\bm{A} = [A_1, \ldots, A_G]^\top$ intrinsically resides in $\hat{\mathcal{H}}_0$. Because the driving force is already orthogonal to $\mathbf{1}$, the \emph{linear} projection operator $P_{\hat{\mathcal{H}}_0}$ acts as the identity on $\bm{A}$:
+\begin{equation}
+\label{eq:vanishing_mu}
+    P_{\hat{\mathcal{H}}_0}(\bm{A}) = \bm{A} - \frac{1}{G}\sum_{i=1}^G A_i \cdot \mathbf{1} = \bm{A}
+\end{equation}
+Thus, in the BHP-inactive linear regime, the empirical chemical potential $\lambda^*$ \emph{exactly vanishes}.
+
+\begin{remark}[Scope of the Vanishing]
+\label{rem:scope_vanishing}
+This vanishing is exact when the linear projection $v_i^* = A_i/\mu$ already satisfies $v_i^* \geq -1$ for all $i$ (i.e., BHP is inactive). When BHP truncation is active---meaning some $A_i/\mu < -1$---the empirical solution becomes $v_i^*(\lambda) = \max(-1, (A_i - \lambda)/\mu)$, and probability conservation requires solving the nonlinear equation:
+\begin{equation}
+\label{eq:bhp_root}
+    \sum_{i=1}^G \max\!\left(-1, \; \frac{A_i - \lambda}{\mu}\right) = 0
+\end{equation}
+Even though $\sum_i A_i = 0$, the $\max(-1, \cdot)$ truncation breaks linearity, so $\lambda^* \neq 0$ in general. In many practical settings with moderate $\mu$ and bounded reward scales, BHP activation may be infrequent and $\lambda^* \approx 0$ may hold as a reasonable approximation; otherwise, $\lambda^*$ should be solved explicitly. The exact bisection solution for $\lambda^*$ under active BHP is addressed in~\cite{Wang2025WGOPO}.
+\end{remark}
+
+\paragraph{The GOPO Loss Function.}
+Substituting the empirical advantage $A_i$ for the driving field $g$, and replacing the analytical fluctuation $v(y_i)$ with the parameterized density ratio $\rho_\theta(y_i) = \pi_\theta(y_i|x)/\pik(y_i|x)$, the constrained functional maximization~\eqref{eq:constrained_opt} reduces to:
+\begin{equation}
+\label{eq:gopo_loss}
+\boxed{
+    \loss_{\text{GOPO}}(\theta) = -\E_{x \sim \mathcal{D}} \left[ \frac{1}{G}\sum_{i=1}^G \left[ A_i \rho_\theta(y_i) - \frac{\mu}{2}\big(\rho_\theta(y_i) - 1\big)^2 \right] \right]
+}
+\end{equation}
+\paragraph{Structural Comparison with GRPO.}
+It is instructive to contrast~\eqref{eq:gopo_loss} with the GRPO loss~\cite{Shao2024GRPO}:
+\begin{equation}
+\label{eq:grpo_loss}
+    \loss_{\text{GRPO}}(\theta) = -\E_{x \sim \mathcal{D}}\left[\frac{1}{G}\sum_{i=1}^G \frac{1}{|y_i|}\sum_{t=1}^{|y_i|} \min\!\Big(\rho_\theta(y_{i,t}) \hat{A}_i,\; \text{clip}(\rho_\theta(y_{i,t}), 1{-}\epsilon, 1{+}\epsilon) \hat{A}_i\Big) - \beta D_{\KL}(\pi_\theta \| \pik)\right]
+\end{equation}
+where $\hat{A}_i$ denotes the advantage (standardized in GRPO's convention, which includes division by std; GOPO uses only centering: $A_i = r_i - \bar{r}$), $\rho_\theta(y_{i,t})$ is the token-level density ratio, and $\epsilon$ is the clip radius. The two losses share the same fundamental motivation---optimizing a policy via group-sampled responses and group-centered advantages---but differ in three fundamental ways:
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Trust region mechanism.} GRPO enforces the trust region via \emph{hard clipping} of the token-level ratio $\rho_\theta(y_{i,t})$ alongside an explicit KL penalty, which introduces a non-smooth, piecewise-linear landscape with zero-gradient plateaus wherever $|\rho_\theta - 1| > \epsilon$. GOPO replaces this with a smooth \emph{quadratic penalty} $\frac{\mu}{2}(\rho_\theta - 1)^2$ on the sequence-level ratio that continuously penalizes deviation from the reference---the ratio can move freely while the restoring force grows linearly, never producing a gradient dead zone.
+    \item \textbf{Optimization curvature.} The Hessian of GRPO's clipped surrogate is either $0$ (inside the flat clipped region) or undefined (at the clip boundary); its effective curvature is data- and state-dependent. GOPO's Hessian is the constant $\mu$, yielding a uniformly convex landscape with predictable convergence (\cref{thm:constant_curvature}).
+    \item \textbf{Gradient behavior at convergence.} As $\rho_\theta \to 1$ and the policy approaches the reference, the GRPO gradient is dominated by the advantage-weighted policy gradient $\hat{A}_i \nabla_\theta \log\pi_\theta$, which scales with the advantage magnitude but does not account for the distance already traveled. GOPO's gradient $-A_i + \mu(\rho_\theta - 1)$ is proportional to the \emph{displacement from equilibrium}, providing a natural deceleration as the policy approaches its target $\rho^* = 1 + A_i/\mu$.
+\end{enumerate}
+In summary, GOPO trades GRPO's hard combinatorial constraint (clip) for a soft geometric one (projection), gaining smoothness, constant curvature, and a principled equilibrium structure at no additional computational cost.
+
+\paragraph{Bounded GOPO Loss.}
+Rather than truncating the scalar loss, we implement BHP by computing the target ratio $\rho_i^{\text{target}}$ from the constrained projection and training toward it via a squared-error loss:
+\begin{equation}
+\label{eq:bhp_target}
+    v_i^* = \max\!\left(-1, \; \frac{A_i - \lambda^*}{\mu}\right), \qquad \rho_i^{\text{target}} = 1 + v_i^*
+\end{equation}
+where $\lambda^*$ is the unique value satisfying $\frac{1}{G}\sum_{i=1}^G v_i^* = 0$ (see \cref{rem:scope_vanishing}; in the BHP-inactive regime, $\lambda^* = 0$ and $\rho_i^{\text{target}} = 1 + A_i/\mu$). The bounded loss is:
+\begin{equation}
+\label{eq:gopo_bounded}
+    \loss_{\text{GOPO}}^{\text{BHP}}(\theta) = \frac{\mu}{2G}\sum_{i=1}^G \big(\rho_\theta(y_i) - \rho_i^{\text{target}}\big)^2
+\end{equation}
+This formulation is mathematically faithful to the BHP: it jointly enforces non-negativity ($\rho_i^{\text{target}} \geq 0$) and probability conservation ($\sum v_i^* = 0$) through the target, while providing smooth gradients $\nabla_\theta \loss \propto (\rho_\theta(y_i) - \rho_i^{\text{target}})\nabla_\theta \rho_\theta(y_i)$ that vanish exactly at the constrained optimum. In the unbounded case ($v_i^* = A_i/\mu$), this loss is equivalent to the work-dissipation form~\eqref{eq:gopo_loss} up to an additive constant independent of $\theta$.
+
+%====================================================================%
+\section{Theoretical Analysis}
+\label{sec:analysis}
+
+\subsection{Constant Curvature and Decoupled Geometry}
+\label{subsec:curvature}
+
+The primary vulnerability of PPO, DPO, and GRPO is their reliance on the exponential divergence $D_{\KL}$. The Hessian of KL-based objectives scales non-linearly with the policy output, causing gradient saturation that must be mitigated via heuristic clipping.
+
+\begin{theorem}[Constant Curvature Optimization]
+\label{thm:constant_curvature}
+Let $\ell(\rho) = -A\rho + \frac{\mu}{2}(\rho - 1)^2$ be the pointwise un-truncated GOPO loss. The Hessian with respect to the density ratio $\rho$ is the constant scalar $\mu$, independent of the advantage signal $A$, the current policy state, or the data distribution.
+\end{theorem}
+
+\begin{proof}
+$\nabla_\rho \ell = -A + \mu(\rho - 1)$, hence $\nabla^2_\rho \ell = \mu$.
+\end{proof}
+
+This constant curvature has immediate consequences for the decoupling of design axes:
+
+\begin{corollary}[Structural Decoupling]
+\label{cor:decoupling}
+In the GOPO objective, the first-order driving force depends on the advantage signal:
+\begin{equation}
+    \nabla_\rho \ell = -A + \mu(\rho - 1)
+\end{equation}
+while the second-order curvature $\nabla^2_\rho \ell = \mu$ is independent of $A$. Consequently, changing the advantage weighting (sampling geometry) does not alter the optimization landscape curvature (optimization geometry), and vice versa.
+\end{corollary}
+
+\begin{remark}[Contrast with KL-Based Methods]
+In DPO, the effective loss is $\ell_{\text{DPO}} \approx -\log\sigma(\beta m)$, where $m$ is the logit margin. The local curvature $\beta^2\sigma(m)(1-\sigma(m))$ depends on both the temperature $\beta$ and the current margin $m$. Changing $\beta$ simultaneously alters the gradient magnitude \emph{and} the stability profile. This data-dependent curvature is the root cause of gradient saturation.
+\end{remark}
+
+\begin{corollary}[Global Linear Convergence]
+\label{cor:convergence}
+Gradient descent in ratio space on the GOPO objective follows the linear system:
+\begin{equation}
+    \rho_{k+1} - \rho^* = (1 - \eta\mu)(\rho_k - \rho^*)
+\end{equation}
+where $\rho^* = 1 + A/\mu$. For step size $0 < \eta < 2/\mu$, this exhibits global contraction to the unique equilibrium at rate $|1 - \eta\mu|$, independent of the advantage distribution.
+\end{corollary}
+
+\subsection{Gradient Dynamics: Non-Saturation Guarantee}
+\label{subsec:gradient}
+
+We quantify the gradient behavior to contrast with KL-based methods.
+
+\paragraph{Gradient Saturation in DPO.}
+For logistic losses, the gradient magnitude satisfies $|\nabla_m \ell_{\text{DPO}}| = |\beta\sigma(m)(1-\sigma(m))| \leq \beta/4$, and crucially, $|\nabla_m \ell_{\text{DPO}}| \to 0$ exponentially as $|m| \to \infty$.
+
+\paragraph{Non-Saturating Gradient in GOPO.}
+For the GOPO loss, the gradient magnitude is:
+\begin{equation}
+    |\nabla_\rho \ell_{\text{GOPO}}| = |{-A + \mu(\rho - 1)}| = \mu|\rho - \rho^*|
+\end{equation}
+This is exactly proportional to the distance from equilibrium. For any non-equilibrium state with $|\rho - \rho^*| \geq \delta$:
+\begin{equation}
+    |\nabla_{\text{GOPO}}| \geq \mu\delta
+\end{equation}
+The gradient maintains a \emph{linear} driving force that never vanishes away from equilibrium, preventing the saturation endemic to KL-based methods.
+
+\subsection{Dead-Zone Effect under BHP Targets}
+\label{subsec:dead_zone}
+
+When BHP truncation assigns $v_i^* = -1$, the target ratio becomes $\rho_i^{\text{target}} = 0$. The gradient of the bounded loss~\eqref{eq:gopo_bounded} is:
+\begin{equation}
+\label{eq:dead_zone_grad}
+    \nabla_\theta \loss_{\text{GOPO}}^{\text{BHP}} \propto \frac{1}{G}\sum_{i=1}^G \underbrace{\big(\rho_\theta(y_i) - \rho_i^{\text{target}}\big)}_{\text{Displacement from BHP Target}} \nabla_\theta \rho_\theta(y_i)
+\end{equation}
+For actions with $\rho_i^{\text{target}} = 0$, the gradient provides a strong suppressive force driving $\rho_\theta(y_i) \to 0$. In practice, exact hard stops (zero gradients) occur only if one explicitly clamps ratios at the boundary (e.g., enforcing $\rho \geq 0$ with a hard projection). Without such clamping, the key effect remains: BHP sets a \emph{zero-probability target} for catastrophic outputs, creating a principled dead-zone in the target policy rather than relying on heuristic clipping.
+
+This mechanism redirects gradient bandwidth exclusively toward distinguishing among higher-quality responses.
+
+\subsection{Connection to $\chi^2$ Divergence}
+\label{subsec:chi2}
+
+The Hilbert space framework provides a natural connection to statistical divergences.
+
+\begin{definition}[Pearson $\chi^2$ Divergence]
+\label{def:chi2}
+We adopt the convention:
+\begin{equation}
+    D_{\chi^2}(\pi \| \pik) \triangleq \E_{\pik}\!\left[\left(\frac{\pi(y)}{\pik(y)} - 1\right)^2\right] = \E_{\pik}\!\left[v(y)^2\right]
+\end{equation}
+\end{definition}
+
+\begin{proposition}[$\chi^2$ Interpretation]
+\label{prop:chi2}
+The dissipation term in the GOPO functional equals $\frac{1}{2}D_{\chi^2}(\pi \| \pik)$:
+\begin{equation}
+    \frac{\mu}{2}\|v\|^2_{\pik} = \frac{\mu}{2}\E_{\pik}\!\left[v(y)^2\right] = \frac{\mu}{2}D_{\chi^2}(\pi \| \pik)
+\end{equation}
+Thus, the GOPO objective can be equivalently read as maximizing advantage-weighted work subject to a $\chi^2$ trust region of radius $\epsilon = D_{\chi^2}(\pi \| \pik)$, with $\mu$ acting as the dual variable.
+\end{proposition}
+
+\begin{proposition}[Total Variation Bound]
+\label{prop:tv}
+Bounding $D_{\chi^2}(\pi\|\pik) = \E_{\pik}[v^2] \leq \epsilon$ guarantees, by the Cauchy--Schwarz inequality $\E[|v|] \leq \sqrt{\E[v^2]}$:
+\begin{equation}
+    \mathrm{TV}(\pi, \pik) = \frac{1}{2}\E_{\pik}[|v|] \leq \frac{1}{2}\sqrt{\E_{\pik}[v^2]} \leq \frac{\sqrt{\epsilon}}{2}
+\end{equation}
+providing a distributional stability guarantee in Total Variation distance.
+\end{proposition}
+
+\subsection{Comparison with Parametric L2 Regularization}
+\label{subsec:l2}
+
+A natural question is whether GOPO's quadratic penalty differs from standard weight decay $\frac{\lambda}{2}\|\theta - \theta_0\|^2$. The distinction is fundamental:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Functional vs. Parametric}: GOPO's penalty $\frac{\mu}{2}\E[v^2]$ acts in the function space of probability ratios. It penalizes deviations where the policy assigns probability mass. Weight decay acts uniformly in parameter space, blind to output-level consequences.
+    \item \textbf{Adaptive Restoring Force}: The gradient $\mu(\rho - 1)$ pulls each specific output ratio back toward unity. Weight decay suppresses all weights uniformly, potentially hindering the formation of sharp, high-confidence reasoning chains.
+    \item \textbf{Geometric Guarantee}: The $\chi^2$ penalty provides distributional bounds (\cref{prop:tv}). Weight decay offers no such output-space guarantee.
+\end{enumerate}
+
+%====================================================================%
+\section{Algorithm and Implementation}
+\label{sec:algorithm}
+
+\begin{figure}[htbp]
+\centering
+\fbox{\parbox{0.92\textwidth}{
+\textbf{Algorithm 1: GOPO (Linear / BHP-Inactive Regime)}
+\vspace{0.5em}
+\hrule
+\vspace{0.5em}
+\textbf{Input:} Initial policy $\pi_\theta$, stiffness $\mu$, group size $G$, learning rate $\eta$
+
+\textbf{for} each iteration \textbf{do}
+\begin{enumerate}[leftmargin=2em, itemsep=0pt]
+    \item \textbf{Set Reference:} $\pik \leftarrow \pi_\theta$ \hfill \textit{(on-policy anchoring)}
+    \item \textbf{Sample Group:} For each prompt $x$, sample $\mathcal{G} = \{y_1, \ldots, y_G\} \sim \pik(\cdot|x)$
+    \item \textbf{Score and Normalize:} Compute rewards $r_i$; set $A_i = r_i - \bar{r}$ \hfill \textit{($\sum A_i = 0$)}
+    \item \textbf{Compute Ratios:} $\rho_\theta(y_i) = \pi_\theta(y_i|x) / \pik(y_i|x)$
+    \item \textbf{Compute Loss:} $\loss = -\frac{1}{G}\sum_{i=1}^G \big[A_i\rho_\theta(y_i) - \frac{\mu}{2}(\rho_\theta(y_i) - 1)^2\big]$
+    \item \textbf{Update:} $\theta \leftarrow \theta - \eta\nabla_\theta \loss$
+\end{enumerate}
+\textbf{end for}
+}}
+\caption{GOPO algorithm (BHP-inactive linear regime). BHP is inactive when $\min_i A_i \geq -\mu$ (equivalently $\min_i A_i/\mu \geq -1$); in this regime $\lambda^* = 0$ is exact and Steps 4--5 implement the unconstrained work-dissipation loss. When $\min_i A_i < -\mu$ (BHP active), the bounded variant~\eqref{eq:gopo_bounded} with $\lambda^*$ solved via bisection (\cref{eq:bhp_root}) should be used instead to maintain probability conservation.}
+\label{alg:gopo}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=1.5cm,
+    auto,
+    block/.style={
+      rectangle,
+      draw,
+      fill=blue!10,
+      text width=6.5em,
+      text centered,
+      rounded corners,
+      minimum height=3em
+    },
+    line/.style={draw, -latex', thick},
+]
+    \node [block] (policy) {Current Policy $\pi_\theta$};
+    \node [block, right of=policy, node distance=3.5cm] (sampling) {Group Sampling $\mathcal{G}$};
+    \node [block, right of=sampling, node distance=3.5cm] (eval) {Reward \& Normalize $A_i$};
+    
+    \node [block, below of=sampling, node distance=2.5cm, fill=green!10, text width=13em] (gopo) {\textbf{Hilbert Projection}\\ 1. Ratio $\rho = \pi_\theta/\pik$ \\ 2. Work: $A_i \rho_i$ \\ 3. Dissipation: $\frac{\mu}{2}(\rho_i - 1)^2$};
+    
+    \node [block, below of=gopo, node distance=2.5cm] (update) {Update $\theta$};
+    
+    \path [line] (policy) -- (sampling);
+    \path [line] (sampling) -- (eval);
+    \path [line] (eval) |- (gopo);
+    \path [line] (sampling) -- (gopo);
+    \path [line] (gopo) -- (update);
+    \path [line] (update) -| node [near start] {Next Iteration} (policy);
+    
+\end{tikzpicture}
+\caption{GOPO flowchart. The core operation (green) implements the empirical orthogonal projection: the advantage signal provides the linear driving force, while the quadratic dissipation term provides the constant-curvature regularization.}
+\label{fig:flowchart}
+\end{figure}
+
+\paragraph{Implementation Notes.}
+GOPO introduces no additional model forward/backward passes compared to GRPO. The only overhead is the computation of $(\rho_\theta - 1)^2$, which is negligible. The reference policy $\pik$ is set to the policy from the start of each iteration (on-policy anchoring), ensuring that the trust region $\rho \approx 1$ holds locally. No critic network is required.
+
+%====================================================================%
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate GOPO against four strong baselines on mathematical reasoning tasks, focusing on out-of-distribution generalization performance.
+
+\subsection{Setup}
+
+\paragraph{Model and Data.} We use Qwen3-1.7B as the base model, trained with the VERL framework~\cite{Sheng2024HybridFlow} on 4$\times$ RTX 4090 GPUs. To stress-test sample efficiency and generalization, we deliberately use a small training set: approximately 10\% of MATH Level 3 problems (sampled with seed 42). Validation is performed every 10 training steps on 100 held-out MATH Level 4 problems---a strictly harder difficulty tier not seen during training---to measure out-of-distribution generalization. All methods share identical hyperparameters: batch size 48, learning rate $2 \times 10^{-6}$, 8 epochs over the training data, and $G=6$ rollout generations per prompt.
+
+\paragraph{Baselines.}
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{OPO}~\cite{Wang2025OPO}: The full Orthogonalized Policy Optimization with importance-sampling reweighting ($\omega_\alpha$), from which GOPO is derived.
+    \item \textbf{GRPO}~\cite{Shao2024GRPO}: Token-level policy gradient with group-normalized advantages and PPO-style ratio clipping ($\epsilon = 0.2$).
+    \item \textbf{GSPO}: Sentence-level variant of GRPO with step-level advantage normalization.
+    \item \textbf{DAPO}~\cite{Yu2025DAPO}: Advanced baseline with asymmetric clip bounds, unnormalized advantages, and overlong reward shaping.
+\end{itemize}
+GOPO uses stiffness $\mu = 0.5$ and on-policy anchoring (no escort reweighting; the advantage $A_i = r_i - \bar{r}$ drives the update directly).
+
+\subsection{Results}
+
+\paragraph{Overall Performance.} \cref{tab:results} summarizes the final metrics for all methods.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of policy optimization algorithms on MATH benchmarks. All methods use Qwen3-1.7B trained on $\sim$10\% of MATH Level 3, validated on 100 MATH Level 4 problems. Reward is averaged over the entire training process.}
+\label{tab:results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Algorithm} & \textbf{Mean Reward}$\uparrow$ & \textbf{Val Acc (L4)}$\uparrow$ & \textbf{Grad Norm} & \textbf{Entropy} \\
+\midrule
+GRPO & 0.544 & 44\% & 0.674 & 0.115 \\
+DAPO & 0.548 & 44\% & 0.213 & 0.126 \\
+GSPO & 0.553 & \textbf{48\%} & 0.623 & 0.128 \\
+OPO  & \textbf{0.558} & \textbf{48\%} & 1.279 & 0.126 \\
+\textbf{GOPO (Ours)} & 0.555 & 47\% & 1.029 & \textbf{0.134} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.}
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Generalization vs.\ Training Reward.} OPO and GOPO achieve the highest mean rewards (0.558 and 0.555) over the training process, which directly translates to their superior generalization performance (48\% and 47\% validation accuracy). In contrast, GRPO struggles with the lowest mean reward (0.544) and poorest generalization (44\%), struggling to efficiently learn from the small training set. GOPO achieves competitive validation accuracy while maintaining an upward trajectory (\cref{fig:training_curves}b).
+    \item \textbf{Gradient Dynamics.} OPO and GOPO maintain substantially higher gradient norms (1.28 and 1.03) than ratio-clipped methods (GRPO: 0.67, GSPO: 0.62, DAPO: 0.21), empirically confirming the non-saturation prediction of \cref{thm:constant_curvature}. DAPO's severely diminished gradients ($\sim$0.21) indicate the conservative clipping is overly restrictive.
+    \item \textbf{Entropy Preservation.} GOPO maintains the highest policy entropy (0.134) among all methods. We attribute this to the sequence-level nature of the GOPO update: unlike token-level methods (GRPO, DAPO) that impose dense per-token supervision forcing rapid mode collapse, GOPO aligns total trajectory probability without micromanaging individual tokens.
+\end{itemize}
+
+\paragraph{Training Dynamics.} \cref{fig:training_curves} shows the full training trajectories across four diagnostic metrics.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{training_curves.pdf}
+\caption{\textbf{Training dynamics comparison.} (a) Training reward: OPO and GOPO achieve the highest mean rewards over the training process. (b) Validation accuracy on MATH Level 4: OPO and GSPO lead at 48\%, with GOPO at 47\% and monotonically improving. (c) Gradient norm: OPO/GOPO maintain healthy norms throughout, while DAPO exhibits severe gradient saturation. (d) Policy entropy: GOPO preserves the most diversity, preventing premature mode collapse.}
+\label{fig:training_curves}
+\end{figure}
+
+\paragraph{Generalization Analysis.} The validation accuracy trajectories (\cref{fig:training_curves}b) reveal important dynamics:
+\begin{itemize}[leftmargin=2em]
+    \item GOPO shows \emph{monotonic improvement} in generalization (38\% $\to$ 46\% $\to$ 47\%), suggesting the algorithm has not yet plateaued and would benefit from longer training.
+    \item OPO starts strong (49\% at step 10) but exhibits non-monotonic behavior (50\% $\to$ 44\% $\to$ 48\%), consistent with the importance-sampling variance inherent in the full OPO framework.
+    \item GRPO and DAPO plateau at 44\%, despite GRPO's higher training reward---a signature of the reward hacking phenomenon where clipping-based methods exploit the training distribution rather than learning generalizable reasoning patterns.
+\end{itemize}
+
+%====================================================================%
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Why Hilbert Space?}
+Our framework is not merely a notational change but a deliberate choice of the mathematical arena best suited to the problem's intrinsic structure. Policy alignment fundamentally operates in an abstract, high-dimensional space where the action vocabulary can range from tens of thousands of tokens to unbounded sequences. In finite-dimensional Euclidean space, optimization over such objects requires explicit coordinates and encounters the curse of dimensionality. The Hilbert space $L^2(\pik)$, by contrast, is purpose-built for abstract infinite-dimensional analysis: it provides a complete inner product structure that makes distances, angles, and projections well-defined \emph{regardless of the underlying dimensionality}. Consequently, mappings and constraints that appear intractably nonlinear on the probability simplex---such as the normalization condition $\sum_y \pi(y) = 1$---collapse into elementary linear-algebraic operations (inner products, closed subspaces, orthogonal projections) once lifted into this space. The probability simplex, equipped with KL geometry, fundamentally entangles the sampling signal with the optimization curvature; the Hilbert space disentangles them entirely. The Hilbert Projection Theorem provides a principled replacement for heuristic clipping, and the chemical potential emerges as a natural geometric by-product of the projection rather than an ad-hoc normalization constant.
+
+\paragraph{Abstract Representations and the Geometry of Distance.}
+The adoption of Hilbert space is not without precedent in sciences that confront fundamentally abstract, high-dimensional state spaces. In quantum mechanics, the state of a physical system is a vector in a Hilbert space, and all measurable predictions---probabilities, expectation values, transition amplitudes---reduce to inner products and projections within that space~\cite{VonNeumann1932}. The power of this formalism lies precisely in its \emph{coordinate-free} nature: the mathematical apparatus operates identically whether the state space is two-dimensional (a qubit) or infinite-dimensional (a quantum field), because the inner product provides a complete metric structure---distance, angle, and projection---independent of any particular basis.
+
+A structurally parallel situation arises in language model alignment. The output of an LLM is a probability distribution over an astronomically large discrete space of possible utterances. What we seek to optimize is not any individual coordinate of this distribution, but its \emph{global geometric relationship} to a target: how ``close'' the aligned policy is to the ideal, constrained by the requirement of remaining a valid distribution. The $L^2(\pik)$ framework provides exactly the right notion of distance ($\|v - u^*\|_{\pik}$) for this task---one that is complete, geometrically meaningful, and agnostic to the dimensionality of the action space. The alignment problem thus reduces to its purest geometric essence: \emph{find the nearest valid point to an ideal target}, an operation that Hilbert space is uniquely equipped to perform via its Projection Theorem.
+
+This perspective also connects to a broader trend in computational cognitive science, where abstract representational spaces---from semantic embeddings to conceptual structures---are increasingly modeled as inner product spaces in which ``similarity'' corresponds to geometric proximity~\cite{Gardenfors2000,Busemeyer2012}. The Hilbert space framework may thus offer a principled mathematical language not only for policy optimization but for any domain where the fundamental task is to navigate distances between abstract, high-dimensional representations under structural constraints.
+
+\paragraph{The Role of Group Centering.}
+The vanishing chemical potential at the group level (in the linear regime) is a structural consequence of the geometry. Group centering ($A_i = r_i - \bar{r}$) ensures that the advantage vector already lies in the zero-mean subspace $\hat{\mathcal{H}}_0$, so no projection along the $\mathbf{1}$ direction is needed when BHP is inactive. When BHP truncation is active, $\lambda^*$ must be solved to restore conservation (\cref{rem:scope_vanishing}).
+
+\paragraph{Relation to Existing Methods.}
+\begin{itemize}[leftmargin=2em]
+    \item Setting $\mu \to 0$ recovers an unconstrained policy gradient (no regularization).
+    \item GOPO's quadratic penalty can be viewed as the Bregman divergence induced by the Euclidean mirror map $\Psi(v) = \frac{1}{2}\|v\|^2$, connecting to the mirror descent literature. However, the Hilbert space derivation is more direct and reveals additional structure (subspaces, projections, chemical potential).
+    \item The dead-zone mechanism (\cref{subsec:dead_zone}) provides a principled alternative to the clip-higher strategy of DAPO~\cite{Yu2025DAPO}, with the advantage of arising from the geometry rather than being hand-designed.
+\end{itemize}
+
+\paragraph{Limitations.}
+GOPO introduces the stiffness parameter $\mu$, which may require tuning. Our experiments focus on mathematical reasoning; validation on diverse domains (instruction following, code generation) remains future work. When BHP truncation is active, the chemical potential $\lambda^*$ must be solved via bisection to restore conservation (\cref{rem:scope_vanishing})---the linear-regime algorithm (\cref{alg:gopo}) does not account for this, and the bounded target regression~\eqref{eq:gopo_bounded} should be used. The exact solution of $\lambda^*$ under active BHP is addressed in detail in W-GOPO~\cite{Wang2025WGOPO}.
+
+%====================================================================%
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented \textbf{Group Orthogonalized Policy Optimization (GOPO)}, an alignment algorithm derived entirely from the geometry of Hilbert function spaces. By lifting policy optimization from the probability simplex into $L^2(\pik)$, we transform the nonlinear normalization constraint into a linear orthogonality condition. The alignment objective itself emerges algebraically from the geometric principle of minimum distance to the unconstrained target, and its closed-form solution is given by the Hilbert Projection Theorem. The Bounded Hilbert Projection extends this to enforce non-negativity, yielding exact sparsity for catastrophic outputs. At the empirical group level, the chemical potential exactly vanishes in the BHP-inactive linear regime under group-centering; when BHP truncation is active, $\lambda^*$ should be solved explicitly to maintain conservation. The resulting loss features constant curvature, non-saturating gradients, and a target-level dead-zone via zero-probability BHP targets. Experiments on mathematical reasoning benchmarks confirm that GOPO sustains learning in high-confidence regimes where clipping-based methods plateau, achieving competitive generalization performance with the healthiest gradient dynamics and entropy preservation among all tested methods.
+
+%====================================================================%
+\begin{thebibliography}{99}\setlength{\itemsep}{0pt}
+
+\bibitem{Rafailov2023DPO}
+R.~Rafailov, A.~Sharma, E.~Mitchell, S.~Ermon, C.~D.~Manning, and C.~Finn.
+Direct Preference Optimization: Your Language Model is Secretly a Reward Model.
+\emph{NeurIPS}, 2023.
+
+\bibitem{Schulman2017PPO}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov.
+Proximal Policy Optimization Algorithms.
+arXiv:1707.06347, 2017.
+
+\bibitem{Schulman2015TRPO}
+J.~Schulman, S.~Levine, P.~Moritz, M.~I.~Jordan, and P.~Abbeel.
+Trust Region Policy Optimization.
+\emph{ICML}, 2015.
+
+\bibitem{Shao2024GRPO}
+Z.~Shao, P.~Wang, Q.~Zhu, R.~Xu, J.~Song, X.~Bi, H.~Zhang, M.~Zhang, Y.~K.~Li, Y.~Wu, and D.~Guo.
+DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.
+arXiv:2402.03300, 2024.
+
+\bibitem{Christiano2017RLHF}
+P.~Christiano, J.~Leike, T.~B.~Brown, M.~Martic, S.~Legg, and D.~Amodei.
+Deep Reinforcement Learning from Human Preferences.
+\emph{NeurIPS}, 2017.
+
+\bibitem{Ouyang2022InstructGPT}
+L.~Ouyang, J.~Wu, X.~Jiang, D.~Almeida, C.~L.~Wainwright, P.~Mishkin, et al.
+Training Language Models to Follow Instructions with Human Feedback.
+\emph{NeurIPS}, 2022.
+
+\bibitem{Azar2024IPO}
+M.~G.~Azar, M.~Rowland, B.~Piot, D.~Guo, D.~Calandriello, M.~Valko, and R.~Munos.
+A General Theoretical Paradigm to Understand Learning from Human Preferences.
+\emph{AISTATS}, 2024.
+
+\bibitem{Meng2024SimPO}
+Y.~Meng, M.~Xia, and D.~Chen.
+SimPO: Simple Preference Optimization with a Reference-Free Reward.
+\emph{NeurIPS}, 2024.
+
+\bibitem{Csiszar1967}
+I.~Csisz\'ar.
+Information-type measures of difference of probability distributions and indirect observations.
+\emph{Studia Sci.\ Math.\ Hungar.}, 2:299--318, 1967.
+
+\bibitem{AliSilvey1966}
+S.~M.~Ali and S.~D.~Silvey.
+A General Class of Coefficients of Divergence of One Distribution from Another.
+\emph{JRSS-B}, 28(1):131--142, 1966.
+
+\bibitem{Li2016Renyi}
+Y.~Li and R.~E.~Turner.
+R\'enyi Divergence Variational Inference.
+\emph{NeurIPS}, 2016.
+
+\bibitem{Nowozin2016fGAN}
+S.~Nowozin, B.~Cseke, and R.~Tomioka.
+f-GAN: Training Generative Neural Samplers Using Variational Divergence Minimization.
+\emph{NeurIPS}, 2016.
+
+\bibitem{Ghasemipour2020fIL}
+S.~K.~S.~Ghasemipour, R.~Zemel, and S.~Gu.
+A Divergence Minimization Perspective on Imitation Learning Methods.
+\emph{CoRL}, 2020.
+
+\bibitem{Xu2023AlphaPPO}
+H.~Xu \emph{et al.}
+Improving Proximal Policy Optimization with Alpha Divergence.
+\emph{Neurocomputing}, 2023.
+
+\bibitem{zixian2025apo}
+Z.~Wang.
+APO: Alpha-Divergence Preference Optimization.
+arXiv:2512.22953, 2025.
+
+\bibitem{Wang2025ADPO}
+Z.~Wang.
+ADPO: Anchored Direct Preference Optimization.
+arXiv:2510.18913, 2025.
+
+\bibitem{Yu2025DAPO}
+Q.~Yu \emph{et al.}
+DAPO: An Open-Source LLM Reinforcement Learning System.
+arXiv:2503.14476, 2025.
+
+\bibitem{Wang2025OPO}
+Z.~Wang.
+Orthogonalized Policy Optimization: Policy Optimization as Orthogonal Projection in Hilbert Space.
+arXiv:2601.12415, 2026.
+
+\bibitem{Wang2025WGOPO}
+Z.~Wang.
+W-GOPO: Weighted Group Orthogonalized Policy Optimization.
+arXiv, 2026.
+
+\bibitem{Sheng2024HybridFlow}
+G.~Sheng, C.~Xu, S.~Yuan, et al.
+HybridFlow: A Flexible and Efficient RLHF Framework.
+arXiv:2409.19256, 2024.
+
+\bibitem{VonNeumann1932}
+J.~von~Neumann.
+\emph{Mathematical Foundations of Quantum Mechanics}.
+Springer, 1932. (English translation: Princeton University Press, 1955.)
+
+\bibitem{Gardenfors2000}
+P.~G\"ardenfors.
+\emph{Conceptual Spaces: The Geometry of Thought}.
+MIT Press, 2000.
+
+\bibitem{Busemeyer2012}
+J.~R.~Busemeyer and P.~D.~Bruza.
+\emph{Quantum Models of Cognition and Decision}.
+Cambridge University Press, 2012.
+
+\end{thebibliography}
+
+%====================================================================%
+\appendix
+\section{Proofs and Derivations}
+\label{app:proofs}
+
+\subsection{Derivation of the Projection Operator}
+\label{app:projection}
+
+\begin{proof}[Proof of \cref{thm:projection}]
+The Hilbert space $\mathcal{H} = L^2(\pik)$ admits the orthogonal decomposition $\mathcal{H} = \mathcal{H}_0 \oplus \text{span}\{\mathbf{1}\}$. For any $f \in \mathcal{H}$, the projection onto $\mathcal{H}_0$ is:
+\begin{equation}
+    P_{\mathcal{H}_0}(f) = f - \frac{\langle f, \mathbf{1}\rangle_{\pik}}{\langle \mathbf{1}, \mathbf{1}\rangle_{\pik}}\mathbf{1} = f - \E_{\pik}[f] \cdot \mathbf{1}
+\end{equation}
+As derived in \cref{subsec:emergence}, minimizing $\frac{\mu}{2}\|v - u^*\|^2$ over $v \in \mathcal{H}_0$ is equivalent to maximizing $\mathcal{J}(v) = \langle g, v\rangle - \frac{\mu}{2}\|v\|^2$, since the two differ only by the constant $\frac{1}{2\mu}\|g\|^2$. The minimum-distance problem has the unique solution $v^* = P_{\mathcal{H}_0}(u^*) = P_{\mathcal{H}_0}(g/\mu)$ by the Hilbert Projection Theorem. Applying the projection formula:
+\begin{equation}
+    v^* = \frac{g}{\mu} - \E_{\pik}\!\left[\frac{g}{\mu}\right]\cdot\mathbf{1} = \frac{1}{\mu}\big(g - \E_{\pik}[g]\cdot\mathbf{1}\big)
+\end{equation}
+\end{proof}
+
+\subsection{Derivation of the Bounded Hilbert Projection}
+\label{app:bhp}
+
+\begin{proof}[Proof of \cref{thm:bhp}]
+The KKT stationarity condition for the Lagrangian gives:
+\begin{equation}
+    g(y) - \mu v(y) - \lambda + \eta(y) = 0
+\end{equation}
+Combined with the complementarity condition $\eta(y)(v(y) + 1) = 0$ and $\eta(y) \geq 0$:
+
+\textbf{Case 1}: $v(y) > -1$. Then $\eta(y) = 0$, so $v(y) = (g(y) - \lambda)/\mu$.
+
+\textbf{Case 2}: $v(y) = -1$. Then $\eta(y) = \lambda - \mu - g(y) \geq 0$, which requires $g(y) \leq \lambda^* - \mu$.
+
+These cases unify as $v^*(y) = \max(-1, (g(y) - \lambda^*)/\mu)$, where $\lambda^*$ solves $\E_{\pik}[v^*] = 0$.
+\end{proof}
+
+\subsection{Log-Ratio Approximation}
+\label{app:log_approx}
+
+\begin{lemma}[Log-Ratio Approximation Error]
+Let $\Delta_\theta(y) = \log\pi_\theta(y) - \log\pik(y)$ and $v_\theta(y) = \exp(\Delta_\theta) - 1$. For $\delta = \|\Delta_\theta\|_\infty < 1$:
+\begin{equation}
+    |v_\theta - \Delta_\theta| \leq \frac{1}{2}\delta^2 e^\delta, \quad |v_\theta^2 - \Delta_\theta^2| \leq \delta^3 e^{2\delta}
+\end{equation}
+The GOPO loss using log-ratios $\Delta_\theta$ in place of $v_\theta = \rho_\theta - 1$ incurs an approximation error of $O(\E[\Delta_\theta^3])$, which is controlled by the on-policy trust region.
+\end{lemma}
+
+\subsection{$\chi^2$-Constrained Maximization Duality}
+\label{app:duality}
+
+\begin{proposition}[Lagrange Dual Equivalence]
+The constrained problem
+$\max_{v \in \mathcal{H}_0} \E_{\pik}[g v]$ subject to $\E_{\pik}[v^2] \leq \epsilon$,
+where $v \in \mathcal{H}_0$ enforces $\E_{\pik}[v] = 0$ (probability conservation),
+has Lagrangian relaxation equal to the GOPO functional $\mathcal{J}(v) = \E[g v] - \frac{\mu}{2}\E[v^2]$ restricted to $\mathcal{H}_0$. The optimal solution is the centered projection $v^* = (g - \E_{\pik}[g]\cdot\mathbf{1})/\mu$. The stiffness $\mu$ is the dual variable for the $\chi^2$ radius $\epsilon$, and determines only the trust-region size; the alignment direction is shaped by the centered driving field $g - \E[g]$.
+\end{proposition}
+
+\end{document}

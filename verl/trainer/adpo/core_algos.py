@@ -940,26 +940,111 @@ def adpo_policy_loss(
         elif loss_variant == "gopo":
             # =====================================================
             # Group Orthogonalized Policy Optimization (GOPO)
-            # L = 1/G * sum( ReLU( -A_i * rho_i + (mu/2) * (rho_i - 1)^2 ) )
+            # L = 1/G * sum( (rho_i - (1 + v_i^*))^2 ) / 2
+            # where v_i^* = max(-1, (A_i - lambda*) / mu)
             # =====================================================
-            alpha = effective_alpha
-            eps = 1e-10
-
+            
             log_ratio_grouped = log_ratio[sorted_idx].view(num_prompts, num_generations)
             rho = torch.exp(log_ratio_grouped)
             adv = adv_grouped.detach()
             
-            # Bounded Hilbert Projection (BHP) Loss
-            # ReLU creates a dead-zone when rho approaches 0 for very negative advantages
-            loss_gopo = torch.nn.functional.relu(-adv * rho + 0.5 * opo_mu * (rho - 1.0)**2)
+            # Bisection for exact lambda* (to handle BHP-active regime correctly)
+            epsilon = 1e-5
+            max_iters = 40
             
+            lambda_high = adv.max(dim=-1, keepdim=True).values + opo_mu
+            lambda_low = adv.min(dim=-1, keepdim=True).values - opo_mu * num_generations
+            
+            for _ in range(max_iters):
+                lambda_mid = (lambda_low + lambda_high) / 2.0
+                v_test = torch.clamp((adv - lambda_mid) / opo_mu, min=-1.0)
+                s = v_test.sum(dim=-1, keepdim=True)
+                lambda_low = torch.where(s > 0, lambda_mid, lambda_low)
+                lambda_high = torch.where(s <= 0, lambda_mid, lambda_high)
+                
+                if (lambda_high - lambda_low).max() < epsilon:
+                    break
+                    
+            lambda_star = (lambda_low + lambda_high) / 2.0
+            
+            # BHP Target with exact lambda*
+            v_star = torch.clamp((adv - lambda_star) / opo_mu, min=-1.0)
+            rho_target = (1.0 + v_star).detach()
+            
+            # MSE Loss (Hilbert Distance)
+            loss_gopo = 0.5 * opo_mu * (rho - rho_target)**2
             loss = loss_gopo.mean()
             
             # Metrics
             log_Z = torch.logsumexp(u_grouped, dim=-1)
             term_alignment = (adv * rho).sum(dim=-1).mean().detach()
             term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
-            u_center_val = u_center.mean().detach()
+            u_center_val = lambda_star.mean().detach()
+
+        elif loss_variant == "wgopo":
+            # =====================================================
+            # Weighted Group Orthogonalized Policy Optimization (W-GOPO)
+            # =====================================================
+            alpha = effective_alpha
+            c = _cfg("wgopo_squash_c", 1.0)
+            epsilon = 1e-5
+            max_iters = 40
+            
+            log_ratio_grouped = log_ratio[sorted_idx].view(num_prompts, num_generations)
+            rho = torch.exp(log_ratio_grouped)
+            
+            # Use raw rewards (sequence_rewards) before standardization
+            # We need to get the raw rewards for the group
+            # adv_grouped is already (r_i - mean) / std if scale_rewards is True
+            # For W-GOPO, we prefer raw centered rewards, but if they are standardized, 
+            # we can use the standardized advantages as the "raw" input to squashing, 
+            # or we can use the actual raw rewards. Let's use adv_grouped as it's already centered.
+            # If scale_rewards was true, it's standardized. W-GOPO paper uses r_i - r_bar.
+            # We'll use adv_grouped directly as it represents the relative reward.
+            
+            r_centered = adv_grouped.detach()
+            
+            # 1. Pre-Squash
+            u_tilde = c * torch.tanh(r_centered / c)
+            
+            # 2. Post-Project
+            A_i = u_tilde - u_tilde.mean(dim=-1, keepdim=True)
+            
+            # 3. Escort Weight
+            omega_tilde = (1.0 - alpha) * A_i + alpha * A_i * torch.exp(A_i)
+            
+            # 4. Center
+            g = omega_tilde - omega_tilde.mean(dim=-1, keepdim=True)
+            
+            # 5. Bisection for exact lambda*
+            lambda_high = g.max(dim=-1, keepdim=True).values + opo_mu
+            lambda_low = g.min(dim=-1, keepdim=True).values - opo_mu * num_generations
+            
+            for _ in range(max_iters):
+                lambda_mid = (lambda_low + lambda_high) / 2.0
+                v_test = torch.clamp((g - lambda_mid) / opo_mu, min=-1.0)
+                s = v_test.sum(dim=-1, keepdim=True)
+                lambda_low = torch.where(s > 0, lambda_mid, lambda_low)
+                lambda_high = torch.where(s <= 0, lambda_mid, lambda_high)
+                
+                if (lambda_high - lambda_low).max() < epsilon:
+                    break
+                    
+            lambda_star = (lambda_low + lambda_high) / 2.0
+            
+            # 6. BHP Target
+            v_star = torch.clamp((g - lambda_star) / opo_mu, min=-1.0)
+            rho_target = (1.0 + v_star).detach()
+            
+            # 7. Loss
+            loss_wgopo = 0.5 * opo_mu * (rho - rho_target)**2
+            loss = loss_wgopo.mean()
+            
+            # Metrics
+            log_Z = torch.logsumexp(u_grouped, dim=-1)
+            term_alignment = (g * rho).sum(dim=-1).mean().detach()
+            term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
+            u_center_val = lambda_star.mean().detach() # Log lambda* as u_center
 
         elif loss_variant == "opo":
             # =====================================================
@@ -995,7 +1080,12 @@ def adpo_policy_loss(
             # Term 1: direction term (weighted policy gradient)
             # Standard OPO uses 1/alpha. Users can override this with opo_direction_scale.
             dir_scale = opo_direction_scale if opo_direction_scale is not None else (1.0 / alpha)
-            term1 = -dir_scale * (w.detach() * seq_log_prob_grouped).sum(dim=-1)
+            
+            # OPO updated: g = w - w_mean (conservation projection)
+            w_mean = w.mean(dim=-1, keepdim=True)
+            g = w - w_mean
+            
+            term1 = -dir_scale * (g.detach() * seq_log_prob_grouped).sum(dim=-1)
 
             # Term 2: magnitude regularization (Euclidean mirror map)
             # (μ/2) * E[Δ²] = (μ/2) * mean over all samples
