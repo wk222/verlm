@@ -1046,6 +1046,61 @@ def adpo_policy_loss(
             term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
             u_center_val = lambda_star.mean().detach() # Log lambda* as u_center
 
+        elif loss_variant == "cltr":
+            # =====================================================
+            # Centered Log-Ratio Trust Region Regression (CLTR)
+            # =====================================================
+            cltr_beta = _cfg("cltr_beta", effective_tau)  # Fallback to effective_tau (tau)
+            cltr_eta = _cfg("cltr_eta", 0.5)
+            cltr_epsilon_tr = _cfg("cltr_epsilon_tr", 0.15)
+            use_gaussian_rank = _cfg("cltr_use_gaussian_rank", True)
+            
+            # 1. Obtain center(r) or Gaussian Rank Normalized reward
+            if use_gaussian_rank:
+                # Vectorized Gaussian Rank Normalization using Probit function (erfinv)
+                P, G = adv_grouped.shape
+                ranks = torch.argsort(torch.argsort(adv_grouped, dim=-1), dim=-1).float()
+                p = (ranks + 0.5) / G
+                p = torch.clamp(p, min=1e-6, max=1.0 - 1e-6)
+                r_hat = 1.41421356 * torch.erfinv(2.0 * p - 1.0)
+                A = r_hat - r_hat.mean(dim=-1, keepdim=True)
+            else:
+                A = adv_grouped - adv_grouped.mean(dim=-1, keepdim=True)
+                
+            # 2. Define current and old centered log-ratios
+            u_theta = u_grouped - u_grouped.mean(dim=-1, keepdim=True)
+            
+            u_old = torch.zeros_like(u_grouped)
+            if rollout_log_probs is not None:
+                seq_lengths = response_mask.sum(dim=-1).clamp(min=1)
+                if use_length_normalization:
+                    seq_rollout_log_prob = (rollout_log_probs * response_mask).sum(dim=-1) / seq_lengths
+                else:
+                    seq_rollout_log_prob = (rollout_log_probs * response_mask).sum(dim=-1)
+                
+                seq_rollout_log_prob_grouped = seq_rollout_log_prob[sorted_idx].view(num_prompts, num_generations)
+                old_log_ratio = (seq_rollout_log_prob_grouped - old_log_prob_grouped) / cltr_beta
+                u_old = old_log_ratio - old_log_ratio.mean(dim=-1, keepdim=True)
+                
+            # 3. Soft target: balance reward direction and proximal anchor
+            u_soft = (A + cltr_eta * u_old) / (cltr_beta + cltr_eta)
+            
+            # 4. Hard projection into RMS trust region
+            diff = u_soft - u_old
+            rms_norm = torch.sqrt(torch.mean(diff ** 2, dim=-1, keepdim=True) + 1e-8)
+            c = torch.clamp(cltr_epsilon_tr / rms_norm, max=1.0)
+            u_plus = u_old + c * diff
+            
+            # L2 loss with stop gradient
+            loss_cltr = 0.5 * (u_theta - u_plus.detach()) ** 2
+            loss = loss_cltr.mean()
+            
+            # Metrics
+            log_Z = torch.logsumexp(u_grouped, dim=-1)
+            term_alignment = (A * u_theta).sum(dim=-1).mean().detach()
+            term_logsumexp = torch.exp(log_Z).mean().detach() / num_generations
+            u_center_val = u_grouped.mean().detach()
+
         elif loss_variant == "opo":
             # =====================================================
             # Orthogonalized Policy Optimization (OPO)

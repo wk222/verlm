@@ -6,7 +6,9 @@ import sys
 import os
 
 # Add the repo root to sys.path
-sys.path.append(r"c:\Users\wzx\Documents\GitHub\verlm")
+import os
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(repo_root)
 
 from verl.trainer.adpo.core_algos import _compute_plackett_luce_loss, adpo_policy_loss
 
@@ -129,10 +131,45 @@ def test_poly_softmax():
     assert torch.allclose(loss, expected_loss), "Poly-Softmax Loss mismatch!"
     print("Poly-Softmax Loss Test Passed!")
 
+def test_cltr():
+    print("\nTesting CLTR Loss...")
+    B, G = 2, 4
+    config = DictConfig({
+        "policy_loss": {
+            "loss_variant": "cltr",
+            "cltr_use_gaussian_rank": True,
+            "cltr_beta": 1.0,
+            "cltr_eta": 0.5,
+            "cltr_epsilon_tr": 0.15,
+            "tau": 1.0,
+            "num_generations": G
+        }
+    })
+    
+    batch_size = B * G
+    log_prob = torch.randn(batch_size, 10, requires_grad=True)
+    old_log_prob = torch.randn(batch_size, 10)
+    advantages = torch.randn(batch_size)
+    response_mask = torch.ones(batch_size, 10)
+    
+    loss, metrics = adpo_policy_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        config=config
+    )
+    
+    print(f"CLTR Loss: {loss.item()}")
+    assert loss.requires_grad, "CLTR Loss does not require grad!"
+    assert loss.item() >= 0.0, "CLTR Loss is negative!"
+    print("CLTR Loss Test Passed!")
+
 if __name__ == "__main__":
     try:
         test_poly_plackett_luce()
         test_poly_softmax()
+        test_cltr()
     except Exception as e:
         print(f"Test failed with error: {e}")
         import traceback
