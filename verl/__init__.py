@@ -28,11 +28,24 @@ from .utils.logging_utils import set_basic_config
 # Register qwen3 model type as qwen2 architecture for transformers version compatibility
 try:
     from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForSequenceClassification
-    from transformers.models.qwen2 import Qwen2Config, Qwen2ForCausalLM, Qwen2Model, Qwen2ForSequenceClassification
-    AutoConfig.register("qwen3", Qwen2Config)
-    AutoModel.register(Qwen2Config, Qwen2Model)
-    AutoModelForCausalLM.register(Qwen2Config, Qwen2ForCausalLM)
-    AutoModelForSequenceClassification.register(Qwen2Config, Qwen2ForSequenceClassification)
+    from transformers.models.qwen2 import Qwen2Config, Qwen2Model, Qwen2ForCausalLM, Qwen2ForSequenceClassification
+    
+    class Qwen3Config(Qwen2Config):
+        model_type = "qwen3"
+        
+    class Qwen3Model(Qwen2Model):
+        config_class = Qwen3Config
+        
+    class Qwen3ForCausalLM(Qwen2ForCausalLM):
+        config_class = Qwen3Config
+        
+    class Qwen3ForSequenceClassification(Qwen2ForSequenceClassification):
+        config_class = Qwen3Config
+
+    AutoConfig.register("qwen3", Qwen3Config)
+    AutoModel.register(Qwen3Config, Qwen3Model)
+    AutoModelForCausalLM.register(Qwen3Config, Qwen3ForCausalLM)
+    AutoModelForSequenceClassification.register(Qwen3Config, Qwen3ForSequenceClassification)
 except Exception:
     pass
 
