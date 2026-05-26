@@ -34,7 +34,7 @@ actor_rollout_ref:
   model:
     path: Qwen/Qwen3-1.7B
     external_lib: null
-    override_config: {}
+    override_config: {attn_implementation: sdpa}
     enable_gradient_checkpointing: True
     enable_activation_offload: False
     use_remove_padding: True
