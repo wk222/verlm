@@ -413,13 +413,24 @@ def apply_monkey_patch(
         return
 
     if use_remove_padding or ulysses_sp_size > 1:
-        if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
-            module._flash_attention_forward = _ulysses_flash_attention_forward
-            print(f"Monkey patch _flash_attention_forward in {model.__module__}")
-        else:
-            from transformers.integrations import flash_attention
-
-            flash_attention._flash_attention_forward = _ulysses_flash_attention_forward
-            print(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
+        patched = False
+        for cls in model.__class__.__mro__:
+            cls_module = sys.modules.get(cls.__module__)
+            if cls_module and hasattr(cls_module, "_flash_attention_forward"):
+                cls_module._flash_attention_forward = _ulysses_flash_attention_forward
+                print(f"Monkey patch _flash_attention_forward in MRO module {cls_module.__name__}")
+                patched = True
+                break
+        if not patched:
+            if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
+                module._flash_attention_forward = _ulysses_flash_attention_forward
+                print(f"Monkey patch _flash_attention_forward in {model.__module__}")
+            else:
+                try:
+                    from transformers.integrations import flash_attention
+                    flash_attention._flash_attention_forward = _ulysses_flash_attention_forward
+                    print(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
+                except ImportError:
+                    print("Could not import flash_attention from transformers.integrations, skipping monkey patch")
 
     patch_forward_with_backends(model, use_fused_kernels=use_fused_kernels, fused_kernels_backend=fused_kernels_backend)
