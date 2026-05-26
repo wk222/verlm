@@ -25,6 +25,17 @@ from .utils.device import is_npu_available
 from .utils.import_utils import import_external_libs
 from .utils.logging_utils import set_basic_config
 
+# Register qwen3 model type as qwen2 architecture for transformers version compatibility
+try:
+    from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForSequenceClassification
+    from transformers.models.qwen2 import Qwen2Config, Qwen2ForCausalLM, Qwen2Model, Qwen2ForSequenceClassification
+    AutoConfig.register("qwen3", Qwen2Config)
+    AutoModel.register(Qwen2Config, Qwen2Model)
+    AutoModelForCausalLM.register(Qwen2Config, Qwen2ForCausalLM)
+    AutoModelForSequenceClassification.register(Qwen2Config, Qwen2ForSequenceClassification)
+except Exception:
+    pass
+
 version_folder = os.path.dirname(os.path.join(os.path.abspath(__file__)))
 
 with open(os.path.join(version_folder, "version/version")) as f:
